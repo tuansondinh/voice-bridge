@@ -84,6 +84,15 @@ body {
   -webkit-overflow-scrolling: touch;
 }
 
+.message.grouped {
+  margin-top: -8px;
+}
+
+.message.grouped .label,
+.message.grouped .timestamp {
+  display: none;
+}
+
 .message {
   max-width: 85%;
   padding: 10px 14px;
@@ -116,6 +125,22 @@ body {
   font-size: 11px;
   color: var(--text-dim);
   margin-bottom: 4px;
+}
+
+.timestamp {
+  font-size: 10px;
+  color: var(--text-dim);
+  opacity: 0.6;
+  display: block;
+  margin-top: 4px;
+}
+
+.message.user .timestamp {
+  text-align: right;
+}
+
+.message.assistant .timestamp {
+  text-align: left;
 }
 
 .message pre {
@@ -338,6 +363,87 @@ body {
 
 .typing-indicator .dots span:nth-child(3) {
   animation-delay: 0.3s;
+}
+
+.scroll-down-btn {
+  position: fixed;
+  left: 50%;
+  bottom: calc(124px + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: 20px;
+  padding: 4px 16px;
+  font-size: 12px;
+  cursor: pointer;
+  z-index: 10;
+  display: none;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+}
+
+.scroll-down-btn.visible {
+  display: block;
+}
+
+.error-card {
+  background: var(--surface);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin: 8px 0;
+  animation: fadeIn 0.2s ease;
+}
+
+.error-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.error-card .retry-btn,
+.reconnect-banner .banner-btn {
+  margin-top: 8px;
+  padding: 4px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface-hover);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.reconnect-banner {
+  background: var(--accent);
+  color: white;
+  padding: 8px 16px;
+  text-align: center;
+  font-size: 13px;
+  display: none;
+  flex-shrink: 0;
+}
+
+.reconnect-banner.visible {
+  display: block;
+}
+
+.reconnect-toast {
+  position: fixed;
+  top: 60px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--success);
+  color: #1a1a2e;
+  padding: 8px 20px;
+  border-radius: 20px;
+  font-size: 13px;
+  z-index: 200;
+  display: none;
+  animation: fadeIn 0.2s ease;
+}
+
+.reconnect-toast.visible {
+  display: block;
 }
 
 @keyframes tool-card-pulse {
@@ -570,7 +676,10 @@ body {
   </div>
 </div>
 
+<div class="reconnect-banner" id="reconnectBanner"></div>
 <div class="chat" id="chat"></div>
+<button class="scroll-down-btn" id="scrollDownBtn" type="button" onclick="scrollToBottom()">↓ New messages</button>
+<div class="reconnect-toast" id="reconnectToast">Reconnected</div>
 
 <div class="controls">
   <div id="voiceView" style="display:flex;flex-direction:column;align-items:center;width:100%;gap:12px">
@@ -669,6 +778,12 @@ let alwaysOnMode = localStorage.getItem('voiceBridgeMode') === 'auto';
 let playbackQueue = [];
 let isPlayingAudio = false;
 let activeSource = null;  // track playing BufferSource so Stop can kill it
+let userScrolledUp = false;
+let newContentArrived = false;
+let lastUserMessage = '';
+let reconnectAttempts = 0;
+let reconnectTimer = null;
+let reconnectToastTimer = null;
 const PLAYBACK_RATE = 24000;
 const JITTER_BUFFER_MS = 0;
 
@@ -684,12 +799,28 @@ const hint = document.getElementById('hint');
 const loading = document.getElementById('loading');
 const textInput = document.getElementById('textInput');
 const sendBtn = document.getElementById('sendBtn');
+const reconnectBanner = document.getElementById('reconnectBanner');
+const reconnectToast = document.getElementById('reconnectToast');
+const scrollDownBtn = document.getElementById('scrollDownBtn');
+
+chat.addEventListener('scroll', () => {
+  const atBottom = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 50;
+  userScrolledUp = !atBottom;
+  if (atBottom) {
+    newContentArrived = false;
+  }
+  updateScrollDownButton();
+});
 
 // ---------------------------------------------------------------------------
 // WebSocket
 // ---------------------------------------------------------------------------
 
 function connect() {
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
+
   const params = new URLSearchParams(window.location.search);
   const token = params.get('token') || '';
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -699,6 +830,15 @@ function connect() {
   ws.binaryType = 'arraybuffer';
 
   ws.onopen = () => {
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    if (reconnectAttempts > 0) {
+      showReconnectToast();
+    }
+    reconnectAttempts = 0;
+    hideReconnectBanner();
     setStatus('connected', 'Connected');
   };
 
@@ -724,8 +864,20 @@ function connect() {
     textInput.disabled = true;
     sendBtn.disabled = true;
     stopRecording();
-    // Reconnect after 3s
-    setTimeout(connect, 3000);
+    loading.classList.add('hidden');
+    removeTypingIndicator();
+    reconnectAttempts += 1;
+    hint.textContent = 'Connection lost';
+    if (reconnectAttempts >= 5) {
+      showReconnectBanner(`
+        Unable to connect. Retry manually.
+        <div><button class="banner-btn" type="button" onclick="manualReconnect()">Retry</button></div>
+      `);
+      return;
+    }
+
+    showReconnectBanner(`Connection lost. Reconnecting... (attempt ${reconnectAttempts}/5)`);
+    reconnectTimer = setTimeout(connect, 3000);
   };
 
   ws.onerror = () => {};
@@ -749,7 +901,10 @@ function handleMessage(msg) {
       break;
 
     case 'transcript':
+      lastUserMessage = msg.text;
+      userScrolledUp = false;
       addMessage('user', msg.text);
+      scrollToBottom();
       setStatus('processing', 'Processing...');
       hint.textContent = 'Claude is thinking...';
       showTypingIndicator();
@@ -827,9 +982,12 @@ function handleMessage(msg) {
       break;
 
     case 'error':
-      addSystemMessage('Error: ' + msg.message);
+      removeTypingIndicator();
+      addErrorMessage(msg.message);
+      sendBtn.disabled = false;
+      textInput.disabled = false;
       setStatus('connected', 'Connected');
-      hint.textContent = 'Tap to speak';
+      hint.textContent = alwaysOnMode ? 'Speak now' : 'Tap to speak';
       break;
   }
 }
@@ -900,7 +1058,7 @@ async function startRecording() {
 
   } catch (err) {
     console.error('Mic error:', err);
-    addSystemMessage('Microphone access denied. Please allow mic access.');
+    addErrorMessage('Microphone access denied. Please allow mic access.', false);
   }
 }
 
@@ -1119,6 +1277,74 @@ function onPlaybackComplete() {
   }
 }
 
+function updateScrollDownButton() {
+  scrollDownBtn.classList.toggle('visible', userScrolledUp && newContentArrived);
+}
+
+function scrollToBottom() {
+  chat.scrollTop = chat.scrollHeight;
+  userScrolledUp = false;
+  newContentArrived = false;
+  updateScrollDownButton();
+}
+
+function scrollIfAtBottom() {
+  if (userScrolledUp) {
+    newContentArrived = true;
+    updateScrollDownButton();
+    return;
+  }
+  scrollToBottom();
+}
+
+function showReconnectBanner(html) {
+  reconnectBanner.innerHTML = html;
+  reconnectBanner.classList.add('visible');
+}
+
+function hideReconnectBanner() {
+  reconnectBanner.classList.remove('visible');
+  reconnectBanner.innerHTML = '';
+}
+
+function showReconnectToast() {
+  reconnectToast.classList.add('visible');
+  clearTimeout(reconnectToastTimer);
+  reconnectToastTimer = setTimeout(() => {
+    reconnectToast.classList.remove('visible');
+  }, 2000);
+}
+
+function manualReconnect() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  reconnectAttempts = 0;
+  hideReconnectBanner();
+  connect();
+}
+
+function formatTimestamp(date = new Date()) {
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function getLastChatMessage() {
+  return Array.from(chat.querySelectorAll('.message'))
+    .filter((el) => el.id !== 'typingIndicator')
+    .pop() || null;
+}
+
+function applyMessageGrouping(el, role, timeMs) {
+  const previous = getLastChatMessage();
+  if (!previous) return;
+  if (previous.dataset.role !== role) return;
+  const previousTime = Number(previous.dataset.time || 0);
+  if (timeMs - previousTime <= 30000) {
+    el.classList.add('grouped');
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Chat UI
 // ---------------------------------------------------------------------------
@@ -1127,9 +1353,13 @@ let currentAssistantEl = null;
 let currentTextSpan = null;
 
 function createAssistantMessage() {
+  const timeMs = Date.now();
   const el = document.createElement('div');
   el.className = 'message assistant';
   el._rawText = '';
+  el.dataset.role = 'assistant';
+  el.dataset.time = String(timeMs);
+  applyMessageGrouping(el, 'assistant', timeMs);
 
   const label = document.createElement('div');
   label.className = 'label';
@@ -1140,8 +1370,13 @@ function createAssistantMessage() {
   content.className = 'content';
   el.appendChild(content);
 
+  const timestamp = document.createElement('span');
+  timestamp.className = 'timestamp';
+  timestamp.textContent = formatTimestamp(new Date(timeMs));
+  el.appendChild(timestamp);
+
   chat.appendChild(el);
-  chat.scrollTop = chat.scrollHeight;
+  scrollIfAtBottom();
   return el;
 }
 
@@ -1164,8 +1399,12 @@ function ensureCurrentTextSpan() {
 }
 
 function addMessage(role, text) {
+  const timeMs = Date.now();
   const el = document.createElement('div');
   el.className = `message ${role}`;
+  el.dataset.role = role;
+  el.dataset.time = String(timeMs);
+  applyMessageGrouping(el, role, timeMs);
 
   const label = document.createElement('div');
   label.className = 'label';
@@ -1176,8 +1415,13 @@ function addMessage(role, text) {
   content.textContent = text;
   el.appendChild(content);
 
+  const timestamp = document.createElement('span');
+  timestamp.className = 'timestamp';
+  timestamp.textContent = formatTimestamp(new Date(timeMs));
+  el.appendChild(timestamp);
+
   chat.appendChild(el);
-  chat.scrollTop = chat.scrollHeight;
+  scrollIfAtBottom();
   return el;
 }
 
@@ -1187,7 +1431,7 @@ function appendAssistantChunk(text) {
   assistantEl._rawText = (assistantEl._rawText || '') + text;
   textSpan._rawText = (textSpan._rawText || '') + text;
   scheduleRenderMarkdown(textSpan);
-  chat.scrollTop = chat.scrollHeight;
+  scrollIfAtBottom();
 }
 
 function finalizeAssistantMessage() {
@@ -1201,14 +1445,19 @@ function finalizeAssistantMessage() {
   currentTextSpan = null;
 }
 
-function addSystemMessage(text) {
+function addErrorMessage(text, showRetry = true) {
   const el = document.createElement('div');
-  el.className = 'message assistant';
-  el.style.opacity = '0.7';
-  el.style.fontStyle = 'italic';
-  el.textContent = text;
+  el.className = 'error-card';
+  const retryButton = showRetry
+    ? '<button class="retry-btn" type="button" onclick="retryLastMessage()">Retry</button>'
+    : '';
+  el.innerHTML = `
+    <div class="error-card-title">⚠ Error</div>
+    <div>${escapeHtml(text || 'Something went wrong.')}</div>
+    ${retryButton}
+  `;
   chat.appendChild(el);
-  chat.scrollTop = chat.scrollHeight;
+  scrollIfAtBottom();
 }
 
 function scheduleRenderMarkdown(textSpan) {
@@ -1405,7 +1654,7 @@ function appendToolCard({ id, name, input }) {
   card.querySelector('.tool-input').textContent = inputText;
 
   assistantEl.querySelector('.content').appendChild(card);
-  chat.scrollTop = chat.scrollHeight;
+  scrollIfAtBottom();
 }
 
 function updateToolCard({ id, tool_use_id, content, is_error }) {
@@ -1445,7 +1694,7 @@ function appendThinkingBlock({ text }) {
   block.querySelector('pre').textContent = text || '';
 
   assistantEl.querySelector('.content').appendChild(block);
-  chat.scrollTop = chat.scrollHeight;
+  scrollIfAtBottom();
 }
 
 function showTypingIndicator() {
@@ -1472,7 +1721,7 @@ function showTypingIndicator() {
   el.appendChild(content);
 
   chat.appendChild(el);
-  chat.scrollTop = chat.scrollHeight;
+  scrollIfAtBottom();
 }
 
 function removeTypingIndicator() {
@@ -1561,11 +1810,18 @@ function setStatus(state, text) {
 
 function sendTextMessage() {
   const text = textInput.value.trim();
+  sendMessageText(text);
+}
+
+function sendMessageText(text) {
   if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
   if (sendBtn.disabled) return;
+  lastUserMessage = text;
+  userScrolledUp = false;
 
   // Show in chat immediately
   addMessage('user', text);
+  scrollToBottom();
 
   // Send to server
   ws.send(JSON.stringify({ type: 'text_message', text }));
@@ -1579,6 +1835,11 @@ function sendTextMessage() {
   setStatus('processing', 'Processing...');
   hint.textContent = 'Claude is thinking...';
   showTypingIndicator();
+}
+
+function retryLastMessage() {
+  if (!lastUserMessage) return;
+  sendMessageText(lastUserMessage);
 }
 
 sendBtn.addEventListener('click', sendTextMessage);

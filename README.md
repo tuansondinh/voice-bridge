@@ -18,9 +18,22 @@ A FastAPI WebSocket server that connects a phone browser to Claude Code on your 
 
 ```bash
 pip install -e .
+# or
+uv sync
 ```
 
 Requires Claude Code CLI on PATH (`claude`).
+
+## Start / restart
+
+```bash
+pkill -f "agent-voice-bridge" 2>/dev/null; pkill -f "uvicorn.*bridge" 2>/dev/null; sleep 1 && \
+  cd /path/to/voice-bridge && \
+  BRIDGE_ALLOWED_ORIGIN="*" nohup uv run voice-bridge --port 8787 > /tmp/bridge.log 2>&1 & \
+  sleep 8 && grep "token=" /tmp/bridge.log | head -1
+```
+
+This kills any running bridge processes, starts fresh, and prints the token URL after 8 seconds. Logs are at `/tmp/bridge.log`.
 
 ---
 

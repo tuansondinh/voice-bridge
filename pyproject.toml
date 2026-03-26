@@ -16,6 +16,7 @@ dependencies = [
     "pywhispercpp>=1,<2",
     "kokoro>=0.9,<1",
     "misaki[en]>=0.9",
+    "pip",
 ]
 
 [project.scripts]

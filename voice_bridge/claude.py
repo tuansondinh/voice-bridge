@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import AsyncGenerator
+import json
+from typing import Any, AsyncGenerator
 
 try:
     from claude_agent_sdk import (
@@ -23,6 +24,10 @@ try:
         ClaudeAgentOptions,
         ClaudeSDKClient,
         TextBlock,
+        ThinkingBlock,
+        ToolResultBlock,
+        ToolUseBlock,
+        UserMessage,
     )
 except ImportError:
     # SDK not installed — names are None so check_available() can return False
@@ -32,6 +37,10 @@ except ImportError:
     ClaudeAgentOptions = None  # type: ignore[assignment,misc]
     ClaudeSDKClient = None  # type: ignore[assignment,misc]
     TextBlock = None  # type: ignore[assignment,misc]
+    ThinkingBlock = None  # type: ignore[assignment,misc]
+    ToolResultBlock = None  # type: ignore[assignment,misc]
+    ToolUseBlock = None  # type: ignore[assignment,misc]
+    UserMessage = None  # type: ignore[assignment,misc]
 
 
 def _log(msg: str) -> None:
@@ -65,15 +74,14 @@ class ClaudeSession:
     Usage::
 
         async with ClaudeSession(model="sonnet") as session:
-            async for chunk in session.send_message("Hello"):
-                print(chunk, end="")
-            async for chunk in session.send_message("How are you?"):
-                print(chunk, end="")
+            async for event in session.send_message("Hello"):
+                print(event)
+            async for event in session.send_message("How are you?"):
+                print(event)
         # SDK client is disconnected here
 
-    The SDK is configured with an empty ``allowed_tools`` list so Claude is
-    restricted to chat-only mode — no file access or shell execution is
-    available through the voice bridge.
+    The SDK is configured with bypassed permissions and full tool access, so
+    Claude can emit tool-use and tool-result events in addition to text.
 
     Parameters
     ----------
@@ -88,7 +96,6 @@ class ClaudeSession:
         _log(f"Auth via {auth_method}")
 
         self._options = ClaudeAgentOptions(
-            allowed_tools=[],           # chat-only — no file/bash access
             permission_mode="bypassPermissions",
             max_turns=100,
             model=model,
@@ -144,8 +151,8 @@ class ClaudeSession:
     # Messaging
     # ------------------------------------------------------------------
 
-    async def send_message(self, text: str) -> AsyncGenerator[str, None]:
-        """Send text to Claude and yield response text chunks incrementally.
+    async def send_message(self, text: str) -> AsyncGenerator[dict[str, Any], None]:
+        """Send text to Claude and yield structured response events incrementally.
 
         The SDK client must be connected before calling this method (i.e., the
         session must be used inside an ``async with`` block).
@@ -157,8 +164,8 @@ class ClaudeSession:
 
         Yields
         ------
-        str
-            Text chunks from Claude's response as they arrive.
+        dict[str, Any]
+            Structured response events as they arrive.
         """
         if not text.strip():
             return
@@ -178,11 +185,31 @@ class ClaudeSession:
                 if self._cancelled:
                     break
 
-                if isinstance(msg, AssistantMessage):
+                if AssistantMessage is not None and isinstance(msg, AssistantMessage):
                     for block in msg.content:
-                        if isinstance(block, TextBlock):
+                        if TextBlock is not None and isinstance(block, TextBlock):
                             if block.text:
-                                yield block.text
+                                yield {"type": "text", "text": block.text}
+                        elif ThinkingBlock is not None and isinstance(block, ThinkingBlock):
+                            if block.thinking:
+                                yield {"type": "thinking", "text": block.thinking}
+                        elif ToolUseBlock is not None and isinstance(block, ToolUseBlock):
+                            yield {
+                                "type": "tool_use",
+                                "id": block.id,
+                                "name": block.name,
+                                "input": block.input,
+                            }
+                elif UserMessage is not None and isinstance(msg, UserMessage):
+                    content = msg.content if isinstance(msg.content, list) else []
+                    for block in content:
+                        if ToolResultBlock is not None and isinstance(block, ToolResultBlock):
+                            yield {
+                                "type": "tool_result",
+                                "tool_use_id": block.tool_use_id,
+                                "content": _stringify_tool_result_content(block.content),
+                                "is_error": bool(block.is_error),
+                            }
 
         except Exception as exc:
             _log(f"Error communicating with Claude: {exc}")
@@ -217,3 +244,12 @@ class ClaudeSession:
             return loader is not None
         except (ImportError, ValueError):
             return False
+
+
+def _stringify_tool_result_content(content: Any) -> str:
+    """Normalize tool result content into a frontend-safe string."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    return json.dumps(content)

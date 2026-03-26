@@ -32,6 +32,65 @@ def _make_assistant_message(text_blocks: list[str]):
     return msg
 
 
+def _make_tool_use_block(tool_use_id: str, name: str, tool_input: dict):
+    """Create a mock ToolUseBlock."""
+    from claude_agent_sdk import ToolUseBlock
+
+    block = MagicMock(spec=ToolUseBlock)
+    block.__class__ = ToolUseBlock
+    block.id = tool_use_id
+    block.name = name
+    block.input = tool_input
+    return block
+
+
+def _make_thinking_block(thinking: str, signature: str = "sig"):
+    """Create a mock ThinkingBlock."""
+    from claude_agent_sdk import ThinkingBlock
+
+    block = MagicMock(spec=ThinkingBlock)
+    block.__class__ = ThinkingBlock
+    block.thinking = thinking
+    block.signature = signature
+    return block
+
+
+def _make_tool_result_block(
+    tool_use_id: str,
+    content: str | list[dict] | None,
+    is_error: bool | None = None,
+):
+    """Create a mock ToolResultBlock."""
+    from claude_agent_sdk import ToolResultBlock
+
+    block = MagicMock(spec=ToolResultBlock)
+    block.__class__ = ToolResultBlock
+    block.tool_use_id = tool_use_id
+    block.content = content
+    block.is_error = is_error
+    return block
+
+
+def _make_assistant_message_with_blocks(blocks: list):
+    """Create a mock AssistantMessage with arbitrary SDK blocks."""
+    from claude_agent_sdk import AssistantMessage
+
+    msg = MagicMock(spec=AssistantMessage)
+    msg.__class__ = AssistantMessage
+    msg.content = blocks
+    return msg
+
+
+def _make_user_message_with_blocks(blocks: list):
+    """Create a mock UserMessage with arbitrary SDK blocks."""
+    from claude_agent_sdk import UserMessage
+
+    msg = MagicMock(spec=UserMessage)
+    msg.__class__ = UserMessage
+    msg.content = blocks
+    return msg
+
+
 def _make_result_message():
     """Create a mock ResultMessage (end-of-stream marker)."""
     from claude_agent_sdk import ResultMessage
@@ -134,7 +193,10 @@ class TestSendMessage:
                     async for chunk in session.send_message("hi"):
                         chunks.append(chunk)
 
-        assert chunks == ["Hello ", "world!"]
+        assert chunks == [
+            {"type": "text", "text": "Hello "},
+            {"type": "text", "text": "world!"},
+        ]
 
     @pytest.mark.asyncio
     async def test_skips_empty_text(self):
@@ -179,6 +241,113 @@ class TestSendMessage:
                         chunks.append(chunk)
 
         assert chunks == []
+
+    @pytest.mark.asyncio
+    async def test_yields_tool_use_events(self):
+        """send_message() yields tool_use events from AssistantMessage blocks."""
+        messages = [
+            _make_assistant_message_with_blocks(
+                [_make_tool_use_block("tool-1", "Read", {"path": "pyproject.toml"})]
+            ),
+            _make_result_message(),
+        ]
+
+        async def _fake_receive_response():
+            for msg in messages:
+                yield msg
+
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.query = AsyncMock()
+        mock_client.receive_response = _fake_receive_response
+
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test"}):
+            from voice_bridge.claude import ClaudeSession
+
+            with patch("voice_bridge.claude.ClaudeSDKClient", return_value=mock_client):
+                async with ClaudeSession() as session:
+                    chunks = []
+                    async for chunk in session.send_message("read the file"):
+                        chunks.append(chunk)
+
+        assert chunks == [
+            {
+                "type": "tool_use",
+                "id": "tool-1",
+                "name": "Read",
+                "input": {"path": "pyproject.toml"},
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_yields_thinking_events(self):
+        """send_message() yields thinking events from AssistantMessage blocks."""
+        messages = [
+            _make_assistant_message_with_blocks(
+                [_make_thinking_block("Reasoning about the request")]
+            ),
+            _make_result_message(),
+        ]
+
+        async def _fake_receive_response():
+            for msg in messages:
+                yield msg
+
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.query = AsyncMock()
+        mock_client.receive_response = _fake_receive_response
+
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test"}):
+            from voice_bridge.claude import ClaudeSession
+
+            with patch("voice_bridge.claude.ClaudeSDKClient", return_value=mock_client):
+                async with ClaudeSession() as session:
+                    chunks = []
+                    async for chunk in session.send_message("think"):
+                        chunks.append(chunk)
+
+        assert chunks == [{"type": "thinking", "text": "Reasoning about the request"}]
+
+    @pytest.mark.asyncio
+    async def test_yields_tool_result_events(self):
+        """send_message() yields tool_result events from UserMessage blocks."""
+        messages = [
+            _make_user_message_with_blocks(
+                [_make_tool_result_block("tool-1", "file contents", False)]
+            ),
+            _make_result_message(),
+        ]
+
+        async def _fake_receive_response():
+            for msg in messages:
+                yield msg
+
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.query = AsyncMock()
+        mock_client.receive_response = _fake_receive_response
+
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test"}):
+            from voice_bridge.claude import ClaudeSession
+
+            with patch("voice_bridge.claude.ClaudeSDKClient", return_value=mock_client):
+                async with ClaudeSession() as session:
+                    chunks = []
+                    async for chunk in session.send_message("run a tool"):
+                        chunks.append(chunk)
+
+        assert chunks == [
+            {
+                "type": "tool_result",
+                "tool_use_id": "tool-1",
+                "content": "file contents",
+                "is_error": False,
+            }
+        ]
 
     @pytest.mark.asyncio
     async def test_cancel_stops_iteration(self):
@@ -228,7 +397,7 @@ class TestSendMessage:
                     await asyncio.wait_for(task, timeout=2.0)
 
         # First chunk was received; subsequent iterations stopped due to cancel
-        assert "first chunk" in chunks
+        assert {"type": "text", "text": "first chunk"} in chunks
         mock_client.interrupt.assert_called_once()
 
 

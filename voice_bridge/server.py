@@ -457,32 +457,58 @@ class BridgeSession:
         tts_task = asyncio.create_task(self._tts_consumer(tts_queue))
 
         try:
-            async for chunk in self._claude.send_message(user_text):
+            async for event in self._claude.send_message(user_text):
                 # If stop was requested, kill Claude and bail out
                 if self._stop_tts.is_set():
                     _log("Stop requested — killing Claude process")
                     self._claude.cancel()
                     break
 
-                full_response.append(chunk)
-                await self._send_json({"type": "assistant_chunk", "text": chunk})
+                event_type = event.get("type")
 
-                # Accumulate for sentence-level TTS
-                sentence_buffer += chunk
-                sentences = _SENTENCE_RE.split(sentence_buffer)
+                if event_type == "text":
+                    chunk = event["text"]
+                    full_response.append(chunk)
+                    await self._send_json({"type": "assistant_chunk", "text": chunk})
 
-                if len(sentences) > 1:
-                    # All but last are complete sentences
-                    for sentence in sentences[:-1]:
-                        sentence = sentence.strip()
-                        if sentence:
-                            _log(f"Queueing sentence for TTS: {sentence[:60]}")
-                            await tts_queue.put(sentence)
-                    sentence_buffer = sentences[-1]
-                elif len(sentence_buffer) > _MAX_SENTENCE_CHARS:
-                    # Force TTS on long chunks without sentence boundaries
-                    await tts_queue.put(sentence_buffer.strip())
-                    sentence_buffer = ""
+                    # Accumulate for sentence-level TTS
+                    sentence_buffer += chunk
+                    sentences = _SENTENCE_RE.split(sentence_buffer)
+
+                    if len(sentences) > 1:
+                        # All but last are complete sentences
+                        for sentence in sentences[:-1]:
+                            sentence = sentence.strip()
+                            if sentence:
+                                _log(f"Queueing sentence for TTS: {sentence[:60]}")
+                                await tts_queue.put(sentence)
+                        sentence_buffer = sentences[-1]
+                    elif len(sentence_buffer) > _MAX_SENTENCE_CHARS:
+                        # Force TTS on long chunks without sentence boundaries
+                        await tts_queue.put(sentence_buffer.strip())
+                        sentence_buffer = ""
+                elif event_type == "thinking":
+                    await self._send_json(
+                        {"type": "thinking", "text": event.get("text", "")}
+                    )
+                elif event_type == "tool_use":
+                    await self._send_json(
+                        {
+                            "type": "tool_use_start",
+                            "id": event.get("id"),
+                            "name": event.get("name"),
+                            "input": event.get("input", {}),
+                        }
+                    )
+                elif event_type == "tool_result":
+                    await self._send_json(
+                        {
+                            "type": "tool_result",
+                            "id": event.get("tool_use_id"),
+                            "content": event.get("content", ""),
+                            "is_error": event.get("is_error", False),
+                        }
+                    )
 
             # Flush remaining text (unless stopped)
             if not self._stop_tts.is_set() and sentence_buffer.strip():

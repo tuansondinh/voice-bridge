@@ -23,6 +23,8 @@ try:
         AssistantMessage,
         ClaudeAgentOptions,
         ClaudeSDKClient,
+        ResultMessage,
+        StreamEvent,
         TextBlock,
         ThinkingBlock,
         ToolResultBlock,
@@ -36,6 +38,8 @@ except ImportError:
     AssistantMessage = None  # type: ignore[assignment,misc]
     ClaudeAgentOptions = None  # type: ignore[assignment,misc]
     ClaudeSDKClient = None  # type: ignore[assignment,misc]
+    ResultMessage = None  # type: ignore[assignment,misc]
+    StreamEvent = None  # type: ignore[assignment,misc]
     TextBlock = None  # type: ignore[assignment,misc]
     ThinkingBlock = None  # type: ignore[assignment,misc]
     ToolResultBlock = None  # type: ignore[assignment,misc]
@@ -186,47 +190,141 @@ class ClaudeSession:
         try:
             client = self._sdk_client
             await client.query(text)
-
-            async for msg in client.receive_response():
-                if self._cancelled:
-                    break
-
-                if AssistantMessage is not None and isinstance(msg, AssistantMessage):
-                    for block in msg.content:
-                        if TextBlock is not None and isinstance(block, TextBlock):
-                            if block.text:
-                                yield {"type": "text", "text": block.text}
-                        elif ThinkingBlock is not None and isinstance(block, ThinkingBlock):
-                            if block.thinking:
-                                yield {"type": "thinking", "text": block.thinking}
-                        elif ToolUseBlock is not None and isinstance(block, ToolUseBlock):
-                            yield {
-                                "type": "tool_use",
-                                "id": block.id,
-                                "name": block.name,
-                                "input": block.input,
-                            }
-                elif UserMessage is not None and isinstance(msg, UserMessage):
-                    content = msg.content if isinstance(msg.content, list) else []
-                    for block in content:
-                        if ToolResultBlock is not None and isinstance(block, ToolResultBlock):
-                            yield {
-                                "type": "tool_result",
-                                "tool_use_id": block.tool_use_id,
-                                "content": _stringify_tool_result_content(block.content),
-                                "is_error": bool(block.is_error),
-                            }
-                    if getattr(msg, "tool_use_result", None):
-                        tool_result = msg.tool_use_result
-                        yield {
-                            "type": "tool_result",
-                            "tool_use_id": tool_result.get("tool_use_id") or msg.parent_tool_use_id,
-                            "content": _stringify_tool_result_content(tool_result.get("content")),
-                            "is_error": bool(tool_result.get("is_error")),
-                        }
+            # Signal that the query has been sent so the server can tag/discover
+            # the session immediately (before any response chunks arrive).
+            yield {"type": "_query_sent"}
+            async for event in self._iter_response():
+                yield event
 
         except Exception as exc:
             _log(f"Error communicating with Claude: {exc}")
+
+    async def _iter_response(self) -> AsyncGenerator[dict[str, Any], None]:
+        """Yield structured events from the SDK client's current response stream.
+
+        Shared by ``send_message`` and ``send_message_with_images``.
+        Assumes ``client.query()`` (or equivalent) has already been called.
+        """
+        client = self._sdk_client
+        if client is None:
+            return
+
+        session_id_emitted = False
+        async for msg in client.receive_response():
+            if self._cancelled:
+                break
+
+            # Extract session_id from the first StreamEvent — authoritative,
+            # comes directly from the SDK rather than a list_sessions heuristic.
+            if StreamEvent is not None and isinstance(msg, StreamEvent):
+                if not session_id_emitted and msg.session_id:
+                    session_id_emitted = True
+                    yield {"type": "_session_id", "session_id": msg.session_id}
+                continue
+
+            # ResultMessage: end-of-turn confirmation, confirms session_id.
+            if ResultMessage is not None and isinstance(msg, ResultMessage):
+                if not session_id_emitted and msg.session_id:
+                    session_id_emitted = True
+                    yield {"type": "_session_id", "session_id": msg.session_id}
+                yield {
+                    "type": "_result",
+                    "session_id": msg.session_id,
+                    "stop_reason": msg.stop_reason,
+                    "num_turns": msg.num_turns,
+                    "is_error": msg.is_error,
+                }
+                continue
+
+            if AssistantMessage is not None and isinstance(msg, AssistantMessage):
+                for block in msg.content:
+                    if TextBlock is not None and isinstance(block, TextBlock):
+                        if block.text:
+                            yield {"type": "text", "text": block.text}
+                    elif ThinkingBlock is not None and isinstance(block, ThinkingBlock):
+                        if block.thinking:
+                            yield {"type": "thinking", "text": block.thinking}
+                    elif ToolUseBlock is not None and isinstance(block, ToolUseBlock):
+                        yield {
+                            "type": "tool_use",
+                            "id": block.id,
+                            "name": block.name,
+                            "input": block.input,
+                        }
+            elif UserMessage is not None and isinstance(msg, UserMessage):
+                content = msg.content if isinstance(msg.content, list) else []
+                for block in content:
+                    if ToolResultBlock is not None and isinstance(block, ToolResultBlock):
+                        yield {
+                            "type": "tool_result",
+                            "tool_use_id": block.tool_use_id,
+                            "content": _stringify_tool_result_content(block.content),
+                            "is_error": bool(block.is_error),
+                        }
+                if getattr(msg, "tool_use_result", None):
+                    tool_result = msg.tool_use_result
+                    yield {
+                        "type": "tool_result",
+                        "tool_use_id": tool_result.get("tool_use_id") or msg.parent_tool_use_id,
+                        "content": _stringify_tool_result_content(tool_result.get("content")),
+                        "is_error": bool(tool_result.get("is_error")),
+                    }
+
+    async def send_message_with_images(
+        self, text: str, images: list[dict[str, Any]]
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Send a message that includes one or more images to Claude.
+
+        Parameters
+        ----------
+        text:
+            Optional text to accompany the images.
+        images:
+            List of dicts with ``data`` (base64 string) and ``media_type``
+            (e.g. ``"image/jpeg"``).
+
+        Yields
+        ------
+        dict[str, Any]
+            Structured response events as they arrive.
+        """
+        if self._sdk_client is None:
+            _log("send_message_with_images() called but SDK client is not connected")
+            return
+
+        self._cancelled = False
+        _log(f"Sending to Claude: {len(images)} image(s) + text: {text[:80]!r}")
+
+        # Build a content block list: image blocks first, then optional text
+        content: list[dict[str, Any]] = []
+        for img in images:
+            content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": img["media_type"],
+                    "data": img["data"],
+                },
+            })
+        if text.strip():
+            content.append({"type": "text", "text": text})
+
+        async def _single_msg():
+            yield {
+                "type": "user",
+                "message": {"role": "user", "content": content},
+                "parent_tool_use_id": None,
+            }
+
+        try:
+            client = self._sdk_client
+            await client.query(_single_msg())
+            yield {"type": "_query_sent"}
+            async for event in self._iter_response():
+                yield event
+
+        except Exception as exc:
+            _log(f"Error sending image message to Claude: {exc}")
 
     def cancel(self) -> None:
         """Interrupt an in-flight response.
@@ -243,6 +341,18 @@ class ClaudeSession:
                 loop.create_task(self._client.interrupt())
             except Exception as exc:
                 _log(f"SDK interrupt error (ignored): {exc}")
+
+    async def set_model(self, model: str) -> None:
+        """Change the active model on the live SDK client connection.
+
+        Parameters
+        ----------
+        model:
+            Model alias (e.g. ``"sonnet"``, ``"opus"``, ``"haiku"``).
+        """
+        if self._sdk_client is not None:
+            await self._sdk_client.set_model(model)
+            _log(f"Model changed to: {model}")
 
     @staticmethod
     def check_available() -> bool:

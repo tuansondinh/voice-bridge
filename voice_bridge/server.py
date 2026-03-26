@@ -189,6 +189,9 @@ _CONTINUATION_TIMEOUT = 1.0
 # Shared models (loaded once at startup via lifespan or on first connect)
 _models: dict[str, Any] = {}
 _active_session: BridgeSession | None = None
+_kick_cooldown_until: float = 0.0  # reject new connections until this timestamp
+_KICK_COOLDOWN_S: float = 3.0  # seconds to wait after kicking a session
+_session_lock: asyncio.Lock = asyncio.Lock()  # serialise admit/kick logic
 
 # Model name to use for new ClaudeSession instances — set at startup via
 # set_bridge_model() when the --model CLI flag is parsed.
@@ -234,6 +237,7 @@ class BridgeSession:
         # ClaudeSession is created here but not yet connected — connect() is
         # called in run() so that the SDK client stays alive for the full
         # session lifetime (preserving multi-turn conversation context).
+        self._current_model: str = _BRIDGE_MODEL
         self._claude = ClaudeSession(model=_BRIDGE_MODEL, resume=resume)
         # Track the active SDK session ID (None until first message completes).
         # When resuming an existing session this is pre-set to that session ID.
@@ -256,50 +260,67 @@ class BridgeSession:
         self._active_response_task: asyncio.Task | None = None
         self._abort_response_requested: bool = False
         self._push_to_talk_active: bool = False
+        self._replacement_ws: asyncio.Queue = asyncio.Queue(maxsize=1)
+        self._session_done: asyncio.Event = asyncio.Event()
+
+    async def swap_ws(self, new_ws) -> None:
+        """Signal run() to transplant the WebSocket (client reconnected same session)."""
+        await self._replacement_ws.put(new_ws)
 
     async def run(self) -> None:
-        """Main session loop: run reader and processor tasks concurrently."""
-        await self._send_json({"type": "ready"})
-        _log("Session started")
-
-        # Connect the SDK client once for the full session lifetime so that
-        # multi-turn conversation context is preserved across all messages.
-        await self._claude.connect()
-
-        reader_task = asyncio.create_task(self._reader_loop())
-        processor_task = asyncio.create_task(self._processor_loop())
-        text_task = asyncio.create_task(self._text_processor_loop())
-
+        """Main session loop with WebSocket-transplant support for reconnects."""
         try:
-            while True:
-                try:
-                    # Wait for either task to finish (disconnect or fatal error)
-                    done, pending = await asyncio.wait(
-                        [reader_task, processor_task, text_task],
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    break
-                except asyncio.CancelledError:
-                    if self._abort_response_requested:
-                        current = asyncio.current_task()
-                        if current is not None:
-                            current.uncancel()
-                        _log("Suppressed session cancellation during client abort")
-                        continue
-                    raise
+            await self._claude.connect()
 
-            # Cancel the other tasks
-            for task in pending:
-                task.cancel()
-                try:
-                    await task
-                except (asyncio.CancelledError, Exception):
-                    pass
+            while True:
+                await self._send_json({"type": "ready", "model": self._current_model})
+                _log("Session started")
+
+                # Flush stale data from any previous WS iteration
+                while not self._audio_queue.empty():
+                    self._audio_queue.get_nowait()
+                while not self._control_queue.empty():
+                    self._control_queue.get_nowait()
+
+                reader_task = asyncio.create_task(self._reader_loop())
+                processor_task = asyncio.create_task(self._processor_loop())
+                text_task = asyncio.create_task(self._text_processor_loop())
+                replace_task = asyncio.create_task(self._replacement_ws.get())
+
+                done, pending = await asyncio.wait(
+                    [reader_task, processor_task, text_task, replace_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in pending:
+                    task.cancel()
+                    try:
+                        await task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+
+                if replace_task in done:
+                    # Client reconnected with same session — swap WS, keep Claude alive
+                    self.ws = replace_task.result()
+                    _log("WebSocket transplanted — resuming session")
+                    self._stop_tts.clear()
+                    self._abort_response_requested = False
+                    continue
+
+                # Normal exit — cancel replace_task if still pending
+                if not replace_task.done():
+                    replace_task.cancel()
+                    try:
+                        await replace_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                break
+
         finally:
             self._claude.cancel()
             await self._claude.close()
             if self._tts_task and not self._tts_task.done():
                 self._tts_task.cancel()
+            self._session_done.set()
             _log("Session ended")
 
     async def _reader_loop(self) -> None:
@@ -372,6 +393,10 @@ class BridgeSession:
                             asyncio.create_task(
                                 self._switch_session(data.get("session_id"))
                             )
+                        elif data.get("type") == "switch_model":
+                            model = data.get("model", "").strip()
+                            if model in ("sonnet", "opus", "haiku"):
+                                asyncio.create_task(self._switch_model(model))
                         else:
                             await self._control_queue.put(data)
                     except _json.JSONDecodeError:
@@ -413,6 +438,17 @@ class BridgeSession:
                     if text:
                         _log(f"Text input: {text[:80]}...")
                         await self._run_response_task(text)
+                elif data.get("type") == "image_message":
+                    images = data.get("images", [])
+                    valid = [
+                        i for i in images
+                        if i.get("media_type") in ("image/jpeg", "image/png", "image/gif", "image/webp")
+                        and len(i.get("data", "")) <= 7_000_000
+                    ]
+                    if valid:
+                        text = data.get("text", "").strip()
+                        _log(f"Image message: {len(valid)} image(s), text: {text[:80]!r}")
+                        await self._run_response_task(text, images=valid)
         except asyncio.CancelledError:
             pass
         except Exception as exc:
@@ -510,9 +546,9 @@ class BridgeSession:
         # Send to Claude and stream response with incremental TTS
         await self._run_response_task(text)
 
-    async def _run_response_task(self, user_text: str) -> None:
+    async def _run_response_task(self, user_text: str, images: list[dict] | None = None) -> None:
         """Run the active Claude response in a cancelable task."""
-        task = asyncio.create_task(self._stream_claude_response(user_text))
+        task = asyncio.create_task(self._stream_claude_response(user_text, images=images))
         self._active_response_task = task
         try:
             await task
@@ -542,12 +578,12 @@ class BridgeSession:
         except Exception as exc:
             _log(f"Claude SDK reset error after abort: {exc}")
 
-    async def _stream_claude_response(self, user_text: str) -> None:
+    async def _stream_claude_response(self, user_text: str, images: list[dict] | None = None) -> None:
         """Send to Claude, stream text to phone, and do incremental TTS."""
         async with self._response_lock:
-            await self._do_stream_claude_response(user_text)
+            await self._do_stream_claude_response(user_text, images=images)
 
-    async def _do_stream_claude_response(self, user_text: str) -> None:
+    async def _do_stream_claude_response(self, user_text: str, images: list[dict] | None = None) -> None:
         """Actual implementation — called under _response_lock."""
         # Cancel any previous TTS that might still be playing on the client
         if self._tts_active:
@@ -568,7 +604,11 @@ class BridgeSession:
         tts_task = asyncio.create_task(self._tts_consumer(tts_queue))
 
         try:
-            async for event in self._claude.send_message(user_text):
+            if images:
+                event_stream = self._claude.send_message_with_images(user_text, images)
+            else:
+                event_stream = self._claude.send_message(user_text)
+            async for event in event_stream:
                 # If stop was requested, kill Claude and bail out
                 if self._stop_tts.is_set():
                     _log("Stop requested — killing Claude process")
@@ -576,6 +616,34 @@ class BridgeSession:
                     break
 
                 event_type = event.get("type")
+
+                if event_type == "_query_sent":
+                    # Query dispatched — notify frontend (session_id still unknown
+                    # for new sessions; will be confirmed via _session_id event).
+                    await self._send_json({
+                        "type": "session_started",
+                        "session_id": self._current_session_id,
+                    })
+                    continue
+
+                if event_type == "_session_id":
+                    # Authoritative session ID from the SDK (via StreamEvent or
+                    # ResultMessage) — replaces the old list_sessions() heuristic
+                    # which could pick up unrelated sessions from the same cwd.
+                    sid = event.get("session_id")
+                    if sid and self._current_session_id != sid:
+                        self._current_session_id = sid
+                        _log(f"Session ID confirmed from SDK: {sid}")
+                        await self._send_json({
+                            "type": "session_started",
+                            "session_id": sid,
+                        })
+                    continue
+
+                if event_type == "_result":
+                    # End-of-turn ResultMessage — session_id already set via
+                    # _session_id above; nothing else to do here.
+                    continue
 
                 if event_type == "text":
                     chunk = event["text"]
@@ -637,33 +705,23 @@ class BridgeSession:
 
             if aborted:
                 await self._reset_claude_after_abort()
+                self._abort_response_requested = False
                 _log("Claude response aborted by client")
                 return
 
-            # Tag the session as "voice-bridge" after every completed response.
-            # The SDK's list_sessions only scans the last 64KB of each JSONL
-            # file for metadata (including the tag entry). Because resumed
-            # sessions accumulate new content after the tag, the tag entry can
-            # fall outside the scan window. Re-tagging after every response
-            # keeps the tag near the end of the file and visible to list_sessions.
-            if response_text:
+            # Re-tag the session after every completed response so the tag
+            # stays near the end of the JSONL and remains visible to list_sessions
+            # (which only scans the last 64KB of each file).
+            if response_text and self._current_session_id:
                 try:
                     import os as _os
-                    from claude_agent_sdk import list_sessions, tag_session
-                    if self._current_session_id is None:
-                        # New session — discover the ID from the most recently
-                        # modified session file (the one just created by the SDK).
-                        recent = list_sessions(directory=_os.getcwd(), limit=1)
-                        if recent:
-                            self._current_session_id = recent[0].session_id
-                            _log(f"Discovered new session: {self._current_session_id}")
-                    if self._current_session_id:
-                        tag_session(
-                            self._current_session_id,
-                            "voice-bridge",
-                            directory=_os.getcwd(),
-                        )
-                        _log(f"Tagged session: {self._current_session_id}")
+                    from claude_agent_sdk import tag_session
+                    tag_session(
+                        self._current_session_id,
+                        "voice-bridge",
+                        directory=_os.getcwd(),
+                    )
+                    _log(f"Tagged session: {self._current_session_id}")
                 except Exception as exc:
                     _log(f"Session tagging error (ignored): {exc}")
 
@@ -683,6 +741,7 @@ class BridgeSession:
                 self._tts.stop()
                 await tts_queue.put(None)
                 await self._reset_claude_after_abort()
+                self._abort_response_requested = False
                 return
             _log("Claude response stream cancelled")
             self._stop_tts.set()
@@ -782,6 +841,17 @@ class BridgeSession:
             # playback (server finishes sending audio before client finishes
             # playing it).
 
+    async def _switch_model(self, model: str) -> None:
+        """Switch the Claude model on the live connection."""
+        _log(f"Switching model → {model!r}")
+        try:
+            await self._claude.set_model(model)
+            self._current_model = model
+            await self._send_json({"type": "model_switched", "model": model})
+        except Exception as exc:
+            _log(f"Model switch error: {exc}")
+            await self._send_json({"type": "error", "text": f"Failed to switch model: {exc}"})
+
     async def _switch_session(self, session_id: str | None) -> None:
         """Switch to a different Claude session (or start a fresh one).
 
@@ -822,18 +892,19 @@ class BridgeSession:
             self._pending_segments.clear()
             self._continuation_deadline = None
 
-            # Create and connect new ClaudeSession
-            self._claude = ClaudeSession(model=_BRIDGE_MODEL, resume=session_id)
+            # Create and connect new ClaudeSession (preserve current model)
+            self._claude = ClaudeSession(model=self._current_model, resume=session_id)
             try:
                 await self._claude.connect()
             except Exception as exc:
                 _log(f"Resume failed for {session_id!r}, falling back to new session: {exc}")
-                self._claude = ClaudeSession(model=_BRIDGE_MODEL, resume=None)
+                self._claude = ClaudeSession(model=self._current_model, resume=None)
                 await self._claude.connect()
                 session_id = None
 
             self._current_session_id = session_id
             # Reset stop event so new responses can proceed
+            self._abort_response_requested = False
             self._stop_tts.clear()
 
         await self._send_json({"type": "session_switched", "session_id": session_id})
@@ -960,7 +1031,7 @@ async def websocket_endpoint(
         last active session ID in ``localStorage`` and passes it here so
         Claude's conversation context is restored on page reload.
     """
-    global _active_session
+    global _active_session, _kick_cooldown_until
 
     # Auth check
     if token != AUTH_TOKEN:
@@ -994,29 +1065,65 @@ async def websocket_endpoint(
                 _log(f"Rejected connection: invalid origin '{origin}'")
                 return
 
-    # Single session enforcement
-    if _active_session is not None:
-        _log("Closing existing session for new connection")
-        try:
-            await _active_session.ws.close(code=4002, reason="Replaced by new connection")
-        except Exception:
-            pass
+    # Single session enforcement — serialised with a lock to prevent races.
+    transplant_target: BridgeSession | None = None
+    new_session: BridgeSession | None = None
 
-    await ws.accept()
-    _log("WebSocket connected")
+    async with _session_lock:
+        now = time.time()
+        resume_id: str | None = resume.strip() or None
 
-    # Pass resume session ID (empty string → None → new session)
-    resume_id: str | None = resume.strip() or None
-    session = BridgeSession(ws, resume=resume_id)
-    _active_session = session
+        if now < _kick_cooldown_until:
+            if _active_session is not None:
+                _log("Rejecting connection: cooldown active after recent kick")
+                await ws.close(code=4003, reason="Reconnect cooldown, try again shortly")
+                return
+            else:
+                _kick_cooldown_until = 0.0
+
+        if _active_session is not None:
+            if resume_id and resume_id == _active_session._current_session_id:
+                # Same session reconnecting (e.g. iOS back from background) —
+                # transplant the WebSocket without interrupting Claude.
+                _log("Same session reconnecting — transplanting WebSocket")
+                transplant_target = _active_session
+                old_ws = _active_session.ws
+                await ws.accept()
+                _log("WebSocket connected (transplant)")
+                await _active_session.swap_ws(ws)
+                try:
+                    await old_ws.close(code=4002, reason="Connection replaced by reconnect")
+                except Exception:
+                    pass
+            else:
+                _log("Closing existing session for new connection")
+                _kick_cooldown_until = now + _KICK_COOLDOWN_S
+                try:
+                    await _active_session.ws.close(code=4002, reason="Replaced by new connection")
+                except Exception:
+                    pass
+                await ws.accept()
+                _log("WebSocket connected")
+                new_session = BridgeSession(ws, resume=resume_id)
+                _active_session = new_session
+        else:
+            await ws.accept()
+            _log("WebSocket connected")
+            new_session = BridgeSession(ws, resume=resume_id)
+            _active_session = new_session
+
+    if transplant_target is not None:
+        # Wait for the transplanted session to fully end (keeps this WS handler alive)
+        await transplant_target._session_done.wait()
+        return
 
     try:
-        await session.run()
+        await new_session.run()
     finally:
-        # Only clear if we still own the reference; a newer connection may
-        # have already replaced _active_session before our finally runs.
-        if _active_session is session:
-            _active_session = None
+        async with _session_lock:
+            if _active_session is new_session:
+                _active_session = None
+                _kick_cooldown_until = 0.0
 
 
 def load_models() -> None:

@@ -10,7 +10,51 @@ A FastAPI WebSocket server that connects a phone browser to Claude Code on your 
 
 > **HTTPS is required.** Browsers only grant microphone access on secure origins
 > (`https://` or `localhost`). A plain `http://` LAN URL will not work — even
-> on the same WiFi. Use VibeTunnel or Tailscale HTTPS (see below).
+> on the same WiFi. Use Cloudflare Tunnel or Tailscale HTTPS (see below).
+
+---
+
+## Quick Start
+
+### 1. Install
+
+```bash
+pip install -e .
+# or
+uv sync
+```
+
+The `claude-agent-sdk` package is installed automatically as a dependency.
+
+### 2. Set up authentication
+
+Pick **one** option below:
+
+#### Option A: Claude Max (OAuth, recommended)
+
+```bash
+# Generate a long-lived token
+claude setup-token
+
+# Copy the token and export it
+export CLAUDE_CODE_OAUTH_TOKEN=<paste_token_here>
+```
+
+#### Option B: Anthropic API key (pay-per-use)
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+If neither is set, voice-bridge will exit with a clear error message.
+
+### 3. Start the server
+
+```bash
+voice-bridge
+```
+
+The terminal prints your local URL with an auth token. Open it on your phone over HTTPS (see [Using with Cloudflare Tunnel](#using-with-cloudflare-tunnel-recommended) or [Using with Tailscale HTTPS](#using-with-tailscale-https)).
 
 ---
 
@@ -149,6 +193,27 @@ Microphone works because the origin is HTTPS. Traffic stays within your Tailscal
 | `BRIDGE_ALLOWED_ORIGIN` | Extra allowed WebSocket origin. Set to `*` for any tunnel. |
 | `CLAUDE_CODE_OAUTH_TOKEN` | Claude Max OAuth token (run `claude setup-token`). |
 | `ANTHROPIC_API_KEY` | Anthropic API key for pay-per-use billing. |
+
+---
+
+## Troubleshooting
+
+**"No authentication method available" error**
+- Make sure you ran `claude setup-token` and exported the token:
+  ```bash
+  export CLAUDE_CODE_OAUTH_TOKEN=<your_token_here>
+  ```
+- Or use an API key instead: `export ANTHROPIC_API_KEY=sk-ant-...`
+
+**"HTTPS is required" / microphone not working on phone**
+- Do not use plain `http://` — it won't work on mobile
+- Use Cloudflare Tunnel (see below) for free HTTPS
+- Or use Tailscale HTTPS if you have Tailscale set up
+
+**Slow first startup (10–15 seconds)**
+- Models are loading for the first time (VAD, Whisper, TTS)
+- Cached after that — subsequent startups are instant
+- Check your internet (downloading ~400 MB of models)
 
 ---
 

@@ -89,7 +89,7 @@ class ClaudeSession:
 
         self._options = ClaudeAgentOptions(
             allowed_tools=[],           # chat-only — no file/bash access
-            permission_mode="acceptEdits",
+            permission_mode="bypassPermissions",
             max_turns=100,
             model=model,
         )
@@ -196,8 +196,10 @@ class ClaudeSession:
         self._cancelled = True
         if self._client is not None:
             _log("Interrupting active Claude SDK client")
+            import asyncio
             try:
-                self._client.interrupt()
+                loop = asyncio.get_event_loop()
+                loop.create_task(self._client.interrupt())
             except Exception as exc:
                 _log(f"SDK interrupt error (ignored): {exc}")
 

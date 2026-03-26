@@ -19,8 +19,10 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from urllib.parse import quote
+
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from voice_bridge.audio import load_vad_model
 from voice_bridge.claude import ClaudeSession
@@ -34,9 +36,22 @@ from voice_bridge.stt import transcribe
 # Globals
 # ---------------------------------------------------------------------------
 
-AUTH_TOKEN = secrets.token_hex(32)
-
 _STATIC_DIR = Path(__file__).parent / "static"
+
+# Persist token across restarts so PWA home screen links keep working.
+# Token is stored in a file next to the static dir and reused on restart.
+_TOKEN_FILE = Path(__file__).parent / ".auth_token"
+
+def _load_or_create_token() -> str:
+    if _TOKEN_FILE.exists():
+        token = _TOKEN_FILE.read_text().strip()
+        if len(token) == 64:  # 32 bytes hex
+            return token
+    token = secrets.token_hex(32)
+    _TOKEN_FILE.write_text(token)
+    return token
+
+AUTH_TOKEN = _load_or_create_token()
 
 # Sentence boundary pattern for incremental TTS
 _SENTENCE_RE = re.compile(r"(?<=[.!?\n])\s+")
@@ -47,6 +62,41 @@ _MAX_SENTENCE_CHARS = 150
 
 def _log(msg: str) -> None:
     print(f"[bridge] {msg}", file=sys.stderr, flush=True)
+
+
+def _make_png(size: int, r: int, g: int, b: int) -> bytes:
+    """Generate a solid-color RGB PNG using stdlib only (struct + zlib)."""
+    import struct
+    import zlib
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        c = struct.pack(">I", len(data)) + tag + data
+        return c + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+    row = bytes([0]) + bytes([r, g, b] * size)  # filter=0, RGB pixels
+    idat = zlib.compress(row * size, 9)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", idat)
+        + chunk(b"IEND", b"")
+    )
+
+
+def _generate_pwa_assets() -> None:
+    """Generate PWA icon PNGs at startup (idempotent — skips existing files)."""
+    icons_dir = _STATIC_DIR / "icons"
+    icons_dir.mkdir(exist_ok=True)
+    R, G, B = 233, 69, 96  # #e94560 — app accent color
+    for name, size in [
+        ("icon-192.png", 192),
+        ("icon-512.png", 512),
+        ("apple-touch-icon.png", 180),
+    ]:
+        path = icons_dir / name
+        if not path.exists():
+            path.write_bytes(_make_png(size, R, G, B))
+            _log(f"Generated PWA icon: {name}")
 
 
 def _get_local_ip() -> str:
@@ -213,6 +263,8 @@ class BridgeSession:
                             self._tts_active = False
                             self._barge_in_buffer = []
                             _log("Client playback complete — TTS active cleared")
+                        elif data.get("type") == "ping":
+                            await self._send_json({"type": "pong"})
                         else:
                             await self._control_queue.put(data)
                     except _json.JSONDecodeError:
@@ -523,7 +575,64 @@ async def serve_ui(token: str = Query("")):
     if not index_path.exists():
         return HTMLResponse("<h1>Voice Bridge</h1><p>index.html not found</p>")
     html = index_path.read_text()
-    return HTMLResponse(html)
+    # Inject tokenized manifest so PWA start_url includes the auth token.
+    # iOS standalone apps have isolated storage — localStorage from Safari
+    # is NOT shared, so the token must be in the manifest start_url.
+    if token:
+        manifest_href = f"/manifest.json?token={quote(token)}"
+        html = html.replace(
+            '<link rel="manifest" href="/manifest.json">',
+            f'<link rel="manifest" href="{manifest_href}">',
+        )
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+
+@app.get("/manifest.json")
+async def serve_manifest(token: str = Query("")):
+    """Serve the PWA web app manifest with tokenized start_url."""
+    manifest = {
+        "name": "Voice Bridge",
+        "short_name": "VoiceBridge",
+        "description": "Voice-to-Claude AI assistant",
+        "start_url": f"/?token={token}" if token else "/",
+        "display": "standalone",
+        "background_color": "#1a1a2e",
+        "theme_color": "#e94560",
+        "orientation": "portrait",
+        "icons": [
+            {"src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+            {"src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
+        ],
+    }
+    return JSONResponse(manifest, media_type="application/manifest+json", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+
+@app.get("/sw.js")
+async def serve_sw():
+    """Serve the PWA service worker (must be at root scope)."""
+    return Response(
+        (_STATIC_DIR / "sw.js").read_bytes(),
+        media_type="application/javascript",
+        headers={
+            "Service-Worker-Allowed": "/",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+        },
+    )
+
+
+@app.get("/icons/{filename}")
+async def serve_icon(filename: str):
+    """Serve PWA icons."""
+    if not filename.endswith(".png") or "/" in filename:
+        raise HTTPException(404)
+    path = _STATIC_DIR / "icons" / filename
+    if not path.exists():
+        raise HTTPException(404)
+    return Response(
+        path.read_bytes(),
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 @app.get("/health")
@@ -621,3 +730,4 @@ def load_models() -> None:
     _models["tts"] = BufferedTTSEngine()
 
     _log("All models loaded and ready.")
+    _generate_pwa_assets()

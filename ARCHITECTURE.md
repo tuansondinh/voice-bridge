@@ -31,7 +31,7 @@ voice_bridge/
 ├── __init__.py          # Package definition
 ├── __main__.py          # Entry point: argument parsing & server startup
 ├── server.py            # FastAPI app, BridgeSession class, WebSocket logic
-├── claude.py            # Claude CLI subprocess wrapper
+├── claude.py            # Claude Agent SDK client
 ├── stt.py               # Whisper.cpp speech-to-text
 ├── tts.py               # Kokoro text-to-speech (not used in bridge)
 ├── audio.py             # Low-level audio utilities & VAD model loader
@@ -119,9 +119,12 @@ or JSON stdout parsing is needed.
 
 **Authentication:**
 - `CLAUDE_CODE_OAUTH_TOKEN` — Claude Max subscription (OAuth, long-lived token)
-  - Generate with: `claude setup-token`
+  - Generate with: `claude setup-token` (interactive prompt, saves to `~/.claude/auth.json`)
+  - Only works if you have a Claude Max subscription
 - `ANTHROPIC_API_KEY` — Anthropic API key (pay-per-use billing)
+  - Get from: https://console.anthropic.com/account/keys
 - At least one must be set; startup checks this before loading models.
+- Priority: `CLAUDE_CODE_OAUTH_TOKEN` is checked first; falls back to `ANTHROPIC_API_KEY`
 
 **ClaudeSession class:**
 - Configures `ClaudeAgentOptions` with `allowed_tools=[]` (chat-only, no
@@ -307,7 +310,7 @@ playback_done message → server clears _tts_active
 
 1. Reader task finishes (WebSocketDisconnect)
 2. Processor/text tasks cancelled
-3. Finally block: Claude subprocess cancelled, TTS task cancelled
+3. Finally block: Claude SDK client cancelled, TTS task cancelled
 4. Session marked as inactive
 
 ## Model Loading & Startup
@@ -390,6 +393,54 @@ Key test scenarios:
 - TTS interruption (Stop button)
 - Rapid successive messages (serialize via _response_lock)
 - Network disconnection (graceful cleanup)
+
+## Troubleshooting
+
+### Authentication Issues
+
+**Error: "No authentication method available"**
+- Check that `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` is set
+- For OAuth: run `claude setup-token` and export the token
+- For API key: get from https://console.anthropic.com/account/keys and export it
+
+**OAuth token expired or invalid**
+- Run `claude setup-token` again to refresh the token
+- Export the new token: `export CLAUDE_CODE_OAUTH_TOKEN=<new_token>`
+
+### WebSocket Connection Issues
+
+**"WebSocket connection failed" on phone**
+- Ensure HTTPS is used (not plain HTTP)
+- Check that `BRIDGE_ALLOWED_ORIGIN` is set to `*` if using Cloudflare Tunnel or Tailscale
+- Verify the token in the URL matches the one printed when server started
+
+**"Microphone not working"**
+- Ensure page is loaded over HTTPS (required by browsers)
+- Check phone's microphone permissions for the browser
+- Try Cloudflare Tunnel if LAN IP fails
+
+### Model Loading Issues
+
+**"Model loading timed out"**
+- First startup takes 10–15 seconds to load VAD, Whisper, and TTS models
+- Subsequent startups are faster (models cached locally)
+- Check disk space for model downloads (~400 MB)
+
+**"onnxruntime import failed"**
+- Install onnxruntime: `pip install onnxruntime`
+- May need to reinstall: `pip install -e . --force-reinstall`
+
+### Performance Issues
+
+**High latency or stuttering**
+- Check CPU usage during TTS and Whisper processing
+- VAD/Whisper use threading; TTS can be slow on CPU
+- Try smaller model: `--model haiku` instead of `--model opus`
+- Ensure no other heavy processes are running
+
+**Echo or feedback during TTS**
+- Mic auto-mutes during TTS playback (barge-in disabled by design)
+- If hearing echo from speakers: reduce phone volume or move away from speaker
 
 ## Future Enhancements
 

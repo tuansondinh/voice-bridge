@@ -109,6 +109,7 @@ body {
   background: var(--assistant-bubble);
   align-self: flex-start;
   border-bottom-left-radius: 4px;
+  position: relative;
 }
 
 .message .label {
@@ -137,7 +138,82 @@ body {
 }
 
 .assistant-text {
-  white-space: pre-wrap;
+  white-space: normal;
+}
+
+.assistant-text ul {
+  list-style: disc;
+  padding-left: 20px;
+  margin: 4px 0;
+}
+
+.assistant-text a {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.message pre.code-block {
+  position: relative;
+  padding-top: 26px;
+}
+
+.code-block {
+  position: relative;
+}
+
+.code-lang {
+  position: absolute;
+  top: 4px;
+  left: 8px;
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+}
+
+.code-copy-btn {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  background: var(--surface-hover);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.code-copy-btn:hover {
+  color: var(--text);
+  background: var(--surface);
+}
+
+.code-copy-btn.copied {
+  color: var(--success);
+}
+
+.message-copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  opacity: 0;
+  transition: opacity 0.2s;
+  background: var(--surface-hover);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 4px 10px;
+}
+
+.message:hover .message-copy-btn,
+.message-copy-btn:focus {
+  opacity: 1;
+}
+
+.message-copy-btn.copied {
+  color: var(--success);
 }
 
 .tool-card {
@@ -1053,6 +1129,7 @@ let currentTextSpan = null;
 function createAssistantMessage() {
   const el = document.createElement('div');
   el.className = 'message assistant';
+  el._rawText = '';
 
   const label = document.createElement('div');
   label.className = 'label';
@@ -1080,7 +1157,7 @@ function ensureCurrentTextSpan() {
   if (!currentTextSpan) {
     currentTextSpan = document.createElement('div');
     currentTextSpan.className = 'assistant-text';
-    currentTextSpan.dataset.rawText = '';
+    currentTextSpan._rawText = '';
     assistantEl.querySelector('.content').appendChild(currentTextSpan);
   }
   return currentTextSpan;
@@ -1105,17 +1182,20 @@ function addMessage(role, text) {
 }
 
 function appendAssistantChunk(text) {
+  const assistantEl = ensureAssistantMessage();
   const textSpan = ensureCurrentTextSpan();
-  textSpan.dataset.rawText = (textSpan.dataset.rawText || '') + text;
-  textSpan.textContent += text;
+  assistantEl._rawText = (assistantEl._rawText || '') + text;
+  textSpan._rawText = (textSpan._rawText || '') + text;
+  scheduleRenderMarkdown(textSpan);
   chat.scrollTop = chat.scrollHeight;
 }
 
 function finalizeAssistantMessage() {
   if (currentAssistantEl) {
     currentAssistantEl.querySelectorAll('.assistant-text').forEach((textSpan) => {
-      textSpan.innerHTML = simpleMarkdown(textSpan.dataset.rawText || textSpan.textContent);
+      flushRenderMarkdown(textSpan);
     });
+    appendMessageCopyButton(currentAssistantEl);
   }
   currentAssistantEl = null;
   currentTextSpan = null;
@@ -1131,21 +1211,142 @@ function addSystemMessage(text) {
   chat.scrollTop = chat.scrollHeight;
 }
 
-function simpleMarkdown(text) {
-  // Escape HTML
-  let html = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+function scheduleRenderMarkdown(textSpan) {
+  if (!textSpan) return;
+  if (textSpan._renderTimer) {
+    clearTimeout(textSpan._renderTimer);
+  }
+  textSpan._renderTimer = setTimeout(() => {
+    textSpan._renderTimer = null;
+    renderMarkdown(textSpan);
+  }, 80);
+}
 
-  // Code blocks
-  html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
+function flushRenderMarkdown(textSpan) {
+  if (!textSpan) return;
+  if (textSpan._renderTimer) {
+    clearTimeout(textSpan._renderTimer);
+    textSpan._renderTimer = null;
+  }
+  renderMarkdown(textSpan);
+}
 
-  // Inline code
-  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+function renderMarkdown(textSpan) {
+  if (!textSpan) return;
+  textSpan.innerHTML = simpleMarkdown(textSpan._rawText || '');
+}
 
-  // Bold
+function escapeHtml(text) {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function plainTextToHtml(text) {
+  return escapeHtml(text).replace(/\n/g, '<br>');
+}
+
+function formatInlineMarkdown(text) {
+  const codeTokens = [];
+  let html = text.replace(/`([^`]+)`/g, (_, code) => {
+    const token = `__INLINE_CODE_${codeTokens.length}__`;
+    codeTokens.push(`<code>${code}</code>`);
+    return token;
+  });
+
+  html = html.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
   html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
 
-  // Line breaks
-  html = html.replace(/\n/g, '<br>');
+  codeTokens.forEach((tokenHtml, idx) => {
+    html = html.replace(`__INLINE_CODE_${idx}__`, tokenHtml);
+  });
+
+  return html;
+}
+
+function renderMarkdownLines(text) {
+  const lines = text.split('\n');
+  const parts = [];
+  let inList = false;
+
+  const closeList = () => {
+    if (inList) {
+      parts.push('</ul>');
+      inList = false;
+    }
+  };
+
+  lines.forEach((line) => {
+    if (!line) {
+      closeList();
+      parts.push('<br>');
+      return;
+    }
+
+    if (/^__CODE_BLOCK_\d+__$/.test(line)) {
+      closeList();
+      parts.push(line);
+      return;
+    }
+
+    const headingMatch = line.match(/^###\s+(.+)$/);
+    if (headingMatch) {
+      closeList();
+      parts.push(`<strong>${formatInlineMarkdown(headingMatch[1])}</strong><br>`);
+      return;
+    }
+
+    const listMatch = line.match(/^\s*-\s+(.+)$/);
+    if (listMatch) {
+      if (!inList) {
+        parts.push('<ul>');
+        inList = true;
+      }
+      parts.push(`<li>${formatInlineMarkdown(listMatch[1])}</li>`);
+      return;
+    }
+
+    closeList();
+    parts.push(`${formatInlineMarkdown(line)}<br>`);
+  });
+
+  closeList();
+  return parts.join('');
+}
+
+function simpleMarkdown(text) {
+  let completeText = text;
+  let trailingPlainText = '';
+  const fenceMatches = text.match(/```/g);
+
+  if (fenceMatches && fenceMatches.length % 2 === 1) {
+    const lastFenceIndex = text.lastIndexOf('```');
+    completeText = text.slice(0, lastFenceIndex);
+    trailingPlainText = text.slice(lastFenceIndex);
+  }
+
+  let html = escapeHtml(completeText);
+  const codeBlocks = [];
+
+  html = html.replace(/```([A-Za-z0-9_+-]*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+    const language = lang || '';
+    const token = `__CODE_BLOCK_${codeBlocks.length}__`;
+    const languageLabel = language ? `<span class="code-lang">${language}</span>` : '';
+    codeBlocks.push(
+      `<pre class="code-block" data-lang="${language}">${languageLabel}<button class="code-copy-btn" onclick="copyCodeBlock(this)">Copy</button><code>${code}</code></pre>`
+    );
+    return token;
+  });
+
+  html = renderMarkdownLines(html);
+  codeBlocks.forEach((blockHtml, idx) => {
+    html = html.replace(`__CODE_BLOCK_${idx}__`, blockHtml);
+  });
+
+  if (trailingPlainText) {
+    html += plainTextToHtml(trailingPlainText);
+  }
 
   return html;
 }
@@ -1175,6 +1376,7 @@ function toggleToolCard(el) {
 
 function appendToolCard({ id, name, input }) {
   const assistantEl = ensureAssistantMessage();
+  flushRenderMarkdown(currentTextSpan);
   currentTextSpan = null;
 
   const card = document.createElement('div');
@@ -1225,6 +1427,7 @@ function updateToolCard({ id, tool_use_id, content, is_error }) {
 
 function appendThinkingBlock({ text }) {
   const assistantEl = ensureAssistantMessage();
+  flushRenderMarkdown(currentTextSpan);
   currentTextSpan = null;
 
   const block = document.createElement('div');
@@ -1276,6 +1479,70 @@ function removeTypingIndicator() {
   const indicator = document.getElementById('typingIndicator');
   if (indicator) {
     indicator.remove();
+  }
+}
+
+async function copyText(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  document.execCommand('copy');
+  textarea.remove();
+}
+
+function showCopiedState(btn) {
+  const originalText = btn.dataset.originalText || btn.textContent;
+  btn.dataset.originalText = originalText;
+  btn.textContent = 'Copied!';
+  btn.classList.add('copied');
+  window.clearTimeout(btn._copiedTimer);
+  btn._copiedTimer = window.setTimeout(() => {
+    btn.textContent = originalText;
+    btn.classList.remove('copied');
+  }, 1500);
+}
+
+async function copyCodeBlock(btn) {
+  const code = btn.parentElement.querySelector('code');
+  if (!code) return;
+  try {
+    await copyText(code.textContent);
+    showCopiedState(btn);
+  } catch (err) {
+    console.error('Copy failed:', err);
+  }
+}
+
+function appendMessageCopyButton(messageEl) {
+  if (!messageEl || messageEl.querySelector('.message-copy-btn') || !(messageEl._rawText || '')) {
+    return;
+  }
+
+  const btn = document.createElement('button');
+  btn.className = 'message-copy-btn';
+  btn.textContent = 'Copy';
+  btn.type = 'button';
+  btn.setAttribute('onclick', 'copyMessage(this)');
+  messageEl.appendChild(btn);
+}
+
+async function copyMessage(btn) {
+  const messageEl = btn.closest('.message.assistant');
+  if (!messageEl || !messageEl._rawText) return;
+  try {
+    await copyText(messageEl._rawText);
+    showCopiedState(btn);
+  } catch (err) {
+    console.error('Copy failed:', err);
   }
 }
 

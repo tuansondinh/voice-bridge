@@ -24,9 +24,9 @@ Requires Claude Code CLI on PATH (`claude`).
 
 ---
 
-## Using with VibeTunnel (recommended)
+## Using with Cloudflare Tunnel (recommended)
 
-[VibeTunnel](https://vibetunnel.sh) creates a public HTTPS tunnel to your local server. This is the easiest way to use the bridge from a phone.
+[Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/) creates a free, no-login HTTPS tunnel to your local server. No account required for quick tunnels.
 
 ### 1. Start the bridge
 
@@ -37,27 +37,31 @@ BRIDGE_ALLOWED_ORIGIN=* voice-bridge
 The terminal prints the token you'll need:
 
 ```
-  Local:   http://localhost:8787/?token=abc123...
-  Network: http://192.168.1.42:8787/?token=abc123...
+  Local:   http://localhost:8787/?token=e085fe85...
+  Network: http://192.168.1.42:8787/?token=e085fe85...
 ```
 
 > `BRIDGE_ALLOWED_ORIGIN=*` disables the origin whitelist so the tunnel's
-> HTTPS origin is accepted. The auth token still protects the endpoint.
-> For tighter security, set it to your specific tunnel URL instead:
-> `BRIDGE_ALLOWED_ORIGIN=https://abc123.vt.dev`
+> HTTPS origin is accepted. The auth token in the URL still protects the endpoint.
 
-### 2. Open the tunnel
+### 2. Open a Cloudflare Tunnel
 
-In a separate terminal:
+Install `cloudflared` if you haven't:
 
 ```bash
-vibetunnel http 8787
+brew install cloudflared
 ```
 
-VibeTunnel prints a public HTTPS URL:
+Then in a separate terminal:
+
+```bash
+cloudflared tunnel --url http://localhost:8787
+```
+
+Cloudflare prints a randomly-named public HTTPS URL:
 
 ```
-https://abc123.vt.dev
+https://monitors-takes-long-riverside.trycloudflare.com
 ```
 
 ### 3. Open on your phone
@@ -65,19 +69,15 @@ https://abc123.vt.dev
 Append the token from step 1:
 
 ```
-https://abc123.vt.dev/?token=abc123...
+https://monitors-takes-long-riverside.trycloudflare.com/?token=e085fe85340b208b4d57eb82e74a6a79f8d745d24a172674270975ca7d0194bc
 ```
 
 The page loads over HTTPS, microphone permission is granted, and the WebSocket connects as `wss://` automatically.
 
 ### Notes
 
-- The token changes on every restart — update the URL if you restart the bridge.
-- For a stable URL across restarts, set `AUTH_TOKEN` in your environment:
-  ```bash
-  AUTH_TOKEN=mytoken BRIDGE_ALLOWED_ORIGIN=* voice-bridge
-  ```
-  *(not yet implemented — use a process manager or keep the terminal open)*
+- Both the tunnel URL and the token change on every restart — regenerate the full URL each time.
+- Quick tunnels (`trycloudflare.com`) are ephemeral and free. For a stable named tunnel, [create a Cloudflare account](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) and run a persistent tunnel.
 
 ---
 

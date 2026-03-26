@@ -128,10 +128,11 @@ class TestSendMessage:
             from voice_bridge.claude import ClaudeSession
 
             with patch("voice_bridge.claude.ClaudeSDKClient", return_value=mock_client):
-                session = ClaudeSession()
-                chunks = []
-                async for chunk in session.send_message("hi"):
-                    chunks.append(chunk)
+                # Use async with so the SDK client is connected before send_message
+                async with ClaudeSession() as session:
+                    chunks = []
+                    async for chunk in session.send_message("hi"):
+                        chunks.append(chunk)
 
         assert chunks == ["Hello ", "world!"]
 
@@ -172,10 +173,10 @@ class TestSendMessage:
             from voice_bridge.claude import ClaudeSession
 
             with patch("voice_bridge.claude.ClaudeSDKClient", return_value=mock_client):
-                session = ClaudeSession()
-                chunks = []
-                async for chunk in session.send_message("hello"):
-                    chunks.append(chunk)
+                async with ClaudeSession() as session:
+                    chunks = []
+                    async for chunk in session.send_message("hello"):
+                        chunks.append(chunk)
 
         assert chunks == []
 
@@ -210,22 +211,21 @@ class TestSendMessage:
             from voice_bridge.claude import ClaudeSession
 
             with patch("voice_bridge.claude.ClaudeSDKClient", return_value=mock_client):
-                session = ClaudeSession()
+                async with ClaudeSession() as session:
+                    chunks = []
+                    got_first = asyncio.Event()
 
-                chunks = []
-                got_first = asyncio.Event()
+                    async def _consume():
+                        async for chunk in session.send_message("hi"):
+                            chunks.append(chunk)
+                            got_first.set()
 
-                async def _consume():
-                    async for chunk in session.send_message("hi"):
-                        chunks.append(chunk)
-                        got_first.set()
-
-                task = asyncio.create_task(_consume())
-                # Wait until we've received the first chunk
-                await asyncio.wait_for(got_first.wait(), timeout=2.0)
-                # Cancel: sets _cancelled=True and calls interrupt(), which sets stop_event
-                session.cancel()
-                await asyncio.wait_for(task, timeout=2.0)
+                    task = asyncio.create_task(_consume())
+                    # Wait until we've received the first chunk
+                    await asyncio.wait_for(got_first.wait(), timeout=2.0)
+                    # Cancel: sets _cancelled=True and calls interrupt(), which sets stop_event
+                    session.cancel()
+                    await asyncio.wait_for(task, timeout=2.0)
 
         # First chunk was received; subsequent iterations stopped due to cancel
         assert "first chunk" in chunks
@@ -261,3 +261,132 @@ class TestPublicInterface:
         assert isinstance(
             ClaudeSession.__dict__["check_available"], staticmethod
         )
+
+    def test_claude_session_is_async_context_manager(self):
+        """ClaudeSession must support 'async with' (has __aenter__ and __aexit__)."""
+        from voice_bridge.claude import ClaudeSession
+
+        assert hasattr(ClaudeSession, "__aenter__"), (
+            "ClaudeSession must implement __aenter__ for 'async with' support"
+        )
+        assert hasattr(ClaudeSession, "__aexit__"), (
+            "ClaudeSession must implement __aexit__ for 'async with' support"
+        )
+
+    def test_close_method_exists(self):
+        """ClaudeSession must expose a close() coroutine method."""
+        import inspect
+
+        from voice_bridge.claude import ClaudeSession
+
+        assert hasattr(ClaudeSession, "close"), (
+            "ClaudeSession must have a close() method to disconnect the SDK client"
+        )
+        assert inspect.iscoroutinefunction(ClaudeSession.close), (
+            "ClaudeSession.close() must be a coroutine (async def)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test: multi-turn context preservation (new lifecycle)
+# ---------------------------------------------------------------------------
+
+
+class TestMultiTurnContext:
+    @pytest.mark.asyncio
+    async def test_same_sdk_client_reused_across_send_message_calls(self):
+        """Calling send_message() twice reuses the same ClaudeSDKClient instance.
+
+        The SDK client is stateful and preserves conversation context only when
+        the same instance handles successive messages.  Creating a new client per
+        message loses all prior context.
+        """
+        created_clients: list = []
+
+        def _make_messages(text_blocks: list[str]):
+            msgs = [_make_assistant_message(text_blocks), _make_result_message()]
+
+            async def _gen():
+                for m in msgs:
+                    yield m
+
+            return _gen
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                created_clients.append(self)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+            async def query(self, text):
+                pass
+
+            def receive_response(self):
+                return _make_messages(["chunk"])(
+
+                )
+
+            def interrupt(self):
+                pass
+
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test"}):
+            from voice_bridge.claude import ClaudeSession
+
+            with patch("voice_bridge.claude.ClaudeSDKClient", FakeClient):
+                async with ClaudeSession() as session:
+                    # First message
+                    async for _ in session.send_message("message one"):
+                        pass
+                    # Second message
+                    async for _ in session.send_message("message two"):
+                        pass
+
+        # Only one client should have been created for both messages
+        assert len(created_clients) == 1, (
+            f"Expected 1 ClaudeSDKClient instance across two send_message() calls, "
+            f"got {len(created_clients)}.  Multi-turn context is lost when a new "
+            f"client is created per message."
+        )
+
+    @pytest.mark.asyncio
+    async def test_context_manager_connects_and_disconnects_client(self):
+        """'async with ClaudeSession()' connects client on enter, closes on exit."""
+        enter_calls = []
+        exit_calls = []
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                enter_calls.append("enter")
+                return self
+
+            async def __aexit__(self, *args):
+                exit_calls.append("exit")
+
+            async def query(self, text):
+                pass
+
+            def receive_response(self):
+                async def _gen():
+                    yield _make_result_message()
+                return _gen()
+
+            def interrupt(self):
+                pass
+
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test"}):
+            from voice_bridge.claude import ClaudeSession
+
+            with patch("voice_bridge.claude.ClaudeSDKClient", FakeClient):
+                async with ClaudeSession() as session:
+                    assert len(enter_calls) == 1, "Client __aenter__ should be called on session entry"
+                    assert len(exit_calls) == 0, "Client __aexit__ should NOT be called while session is open"
+
+                # After exiting the context manager
+                assert len(exit_calls) == 1, "Client __aexit__ must be called on session exit"

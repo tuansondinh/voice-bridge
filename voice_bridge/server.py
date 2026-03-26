@@ -1,8 +1,8 @@
 """bridge.py — FastAPI voice bridge server.
 
-WebSocket-based server that connects a phone browser to Claude Code CLI
+WebSocket-based server that connects a phone browser to the Claude Agent SDK
 with voice I/O. Audio is processed on the PC (Whisper STT, Kokoro TTS),
-text is piped to/from Claude CLI.
+text is sent to/from the Claude Agent SDK.
 
 Run via: agent-voice-bridge (or python -m lazy_claude.bridge_main)
 """
@@ -116,6 +116,9 @@ class BridgeSession:
         self._continuation_deadline: float | None = None
         self._tts = _models["tts"]
         self._whisper_model = _models["whisper"]
+        # ClaudeSession is created here but not yet connected — connect() is
+        # called in run() so that the SDK client stays alive for the full
+        # session lifetime (preserving multi-turn conversation context).
         self._claude = ClaudeSession(model=_BRIDGE_MODEL)
         self._tts_task: asyncio.Task | None = None
         self._stop_tts = asyncio.Event()
@@ -138,6 +141,10 @@ class BridgeSession:
         await self._send_json({"type": "ready"})
         _log("Session started")
 
+        # Connect the SDK client once for the full session lifetime so that
+        # multi-turn conversation context is preserved across all messages.
+        await self._claude.connect()
+
         reader_task = asyncio.create_task(self._reader_loop())
         processor_task = asyncio.create_task(self._processor_loop())
         text_task = asyncio.create_task(self._text_processor_loop())
@@ -157,6 +164,7 @@ class BridgeSession:
                     pass
         finally:
             self._claude.cancel()
+            await self._claude.close()
             if self._tts_task and not self._tts_task.done():
                 self._tts_task.cancel()
             _log("Session ended")

@@ -55,9 +55,21 @@ def _check_auth() -> str:
 class ClaudeSession:
     """Manages a multi-turn conversation with Claude via the Agent SDK.
 
-    Uses ``ClaudeSDKClient`` as a persistent session context manager so that
-    conversation context is preserved across calls without manual session_id
-    tracking.
+    ``ClaudeSDKClient`` is stateful — it preserves conversation context across
+    messages only when the same client instance is reused.  ``ClaudeSession``
+    is therefore an **async context manager** that connects the SDK client once
+    on entry and disconnects it on exit.  All ``send_message()`` calls within
+    the same ``async with`` block share the same client and thus the same
+    conversation context.
+
+    Usage::
+
+        async with ClaudeSession(model="sonnet") as session:
+            async for chunk in session.send_message("Hello"):
+                print(chunk, end="")
+            async for chunk in session.send_message("How are you?"):
+                print(chunk, end="")
+        # SDK client is disconnected here
 
     The SDK is configured with an empty ``allowed_tools`` list so Claude is
     restricted to chat-only mode — no file access or shell execution is
@@ -82,13 +94,61 @@ class ClaudeSession:
             model=model,
         )
 
-        # Active SDK client (set inside send_message context)
+        # The SDK client — created once and kept alive for the session lifetime.
+        # It is entered (connected) via __aenter__ / connect() and exited via
+        # __aexit__ / close().  Access only after connect() has been called.
+        self._sdk_client: ClaudeSDKClient | None = None
+        # Reference to the currently active client exposed for cancel()
         self._client: ClaudeSDKClient | None = None
         # Flag to signal cancellation to the streaming loop
         self._cancelled: bool = False
 
+    # ------------------------------------------------------------------
+    # Async context manager — connects/disconnects the SDK client once
+    # ------------------------------------------------------------------
+
+    async def __aenter__(self) -> "ClaudeSession":
+        await self.connect()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        await self.close()
+
+    async def connect(self) -> None:
+        """Enter the SDK client context manager (connect once).
+
+        Called automatically by ``async with ClaudeSession(...) as s``.
+        """
+        client = ClaudeSDKClient(options=self._options)
+        self._sdk_client = await client.__aenter__()
+        self._client = self._sdk_client
+        _log("SDK client connected")
+
+    async def close(self) -> None:
+        """Exit the SDK client context manager (disconnect).
+
+        Called automatically when exiting the ``async with`` block, or can be
+        called explicitly to shut down the session.
+        """
+        if self._sdk_client is not None:
+            try:
+                await self._sdk_client.__aexit__(None, None, None)
+                _log("SDK client disconnected")
+            except Exception as exc:
+                _log(f"SDK client close error (ignored): {exc}")
+            finally:
+                self._sdk_client = None
+                self._client = None
+
+    # ------------------------------------------------------------------
+    # Messaging
+    # ------------------------------------------------------------------
+
     async def send_message(self, text: str) -> AsyncGenerator[str, None]:
         """Send text to Claude and yield response text chunks incrementally.
+
+        The SDK client must be connected before calling this method (i.e., the
+        session must be used inside an ``async with`` block).
 
         Parameters
         ----------
@@ -103,28 +163,29 @@ class ClaudeSession:
         if not text.strip():
             return
 
+        if self._sdk_client is None:
+            _log("send_message() called but SDK client is not connected — skipping")
+            return
+
         self._cancelled = False
         _log(f"Sending to Claude: {text[:80]}...")
 
         try:
-            async with ClaudeSDKClient(options=self._options) as client:
-                self._client = client
-                await client.query(text)
+            client = self._sdk_client
+            await client.query(text)
 
-                async for msg in client.receive_response():
-                    if self._cancelled:
-                        break
+            async for msg in client.receive_response():
+                if self._cancelled:
+                    break
 
-                    if isinstance(msg, AssistantMessage):
-                        for block in msg.content:
-                            if isinstance(block, TextBlock):
-                                if block.text:
-                                    yield block.text
+                if isinstance(msg, AssistantMessage):
+                    for block in msg.content:
+                        if isinstance(block, TextBlock):
+                            if block.text:
+                                yield block.text
 
         except Exception as exc:
             _log(f"Error communicating with Claude: {exc}")
-        finally:
-            self._client = None
 
     def cancel(self) -> None:
         """Interrupt an in-flight response.

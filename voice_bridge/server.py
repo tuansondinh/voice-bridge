@@ -309,6 +309,7 @@ class BridgeSession:
                         if data.get("type") == "stop_tts":
                             self._stop_tts.set()
                             self._tts.stop()
+                            self._claude.cancel()
                             _log("TTS interrupted by client")
                         elif data.get("type") == "vad_reset":
                             # Client switched to push mode — flush all

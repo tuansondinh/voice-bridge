@@ -8,32 +8,25 @@ A FastAPI WebSocket server that connects a phone browser to Claude Code on your 
 - **Text input** — type instead of speak, same Claude session
 - **Half-duplex** — mic auto-mutes during playback; tap Stop to interrupt
 
+> **HTTPS is required.** Browsers only grant microphone access on secure origins
+> (`https://` or `localhost`). A plain `http://` LAN URL will not work — even
+> on the same WiFi. Use VibeTunnel or Tailscale HTTPS (see below).
+
 ---
 
-## Quick start (same WiFi)
+## Install
 
 ```bash
-# Install
 pip install -e .
-
-# Run
-voice-bridge
 ```
 
-The terminal prints two URLs:
-
-```
-Local:   http://localhost:8787/?token=<token>
-Network: http://192.168.1.42:8787/?token=<token>
-```
-
-Open the **Network** URL on your phone. Both devices must be on the same WiFi.
+Requires Claude Code CLI on PATH (`claude`).
 
 ---
 
-## Using with VibeTunnel (remote / different network)
+## Using with VibeTunnel (recommended)
 
-[VibeTunnel](https://vibetunnel.sh) creates a public HTTPS tunnel to your local server — useful when your phone and PC are on different networks, or when you want to share the bridge externally.
+[VibeTunnel](https://vibetunnel.sh) creates a public HTTPS tunnel to your local server. This is the easiest way to use the bridge from a phone.
 
 ### 1. Start the bridge
 
@@ -41,9 +34,19 @@ Open the **Network** URL on your phone. Both devices must be on the same WiFi.
 BRIDGE_ALLOWED_ORIGIN=* voice-bridge
 ```
 
-> `BRIDGE_ALLOWED_ORIGIN=*` disables the origin check. The auth token in the URL still protects the endpoint. Use a specific origin (e.g. `BRIDGE_ALLOWED_ORIGIN=https://abc123.vt.dev`) if you want tighter security.
+The terminal prints the token you'll need:
 
-### 2. Create a VibeTunnel
+```
+  Local:   http://localhost:8787/?token=abc123...
+  Network: http://192.168.1.42:8787/?token=abc123...
+```
+
+> `BRIDGE_ALLOWED_ORIGIN=*` disables the origin whitelist so the tunnel's
+> HTTPS origin is accepted. The auth token still protects the endpoint.
+> For tighter security, set it to your specific tunnel URL instead:
+> `BRIDGE_ALLOWED_ORIGIN=https://abc123.vt.dev`
+
+### 2. Open the tunnel
 
 In a separate terminal:
 
@@ -51,48 +54,49 @@ In a separate terminal:
 vibetunnel http 8787
 ```
 
-VibeTunnel will print a public URL like:
+VibeTunnel prints a public HTTPS URL:
 
 ```
 https://abc123.vt.dev
 ```
 
-### 3. Build the phone URL
+### 3. Open on your phone
 
-Grab the `token` value from the bridge terminal output, then append it:
+Append the token from step 1:
 
 ```
-https://abc123.vt.dev/?token=<token>
+https://abc123.vt.dev/?token=abc123...
 ```
 
-Open that URL on your phone. The bridge UI loads over HTTPS and the WebSocket upgrades to `wss://` automatically.
+The page loads over HTTPS, microphone permission is granted, and the WebSocket connects as `wss://` automatically.
 
 ### Notes
 
-- The token changes every time the bridge restarts — regenerate the URL if you restart.
-- VibeTunnel's free tier may have connection limits; for continuous use consider Tailscale instead.
-- For a persistent tunnel URL, run `vibetunnel http 8787 --name mybridge` (if your plan supports named tunnels).
+- The token changes on every restart — update the URL if you restart the bridge.
+- For a stable URL across restarts, set `AUTH_TOKEN` in your environment:
+  ```bash
+  AUTH_TOKEN=mytoken BRIDGE_ALLOWED_ORIGIN=* voice-bridge
+  ```
+  *(not yet implemented — use a process manager or keep the terminal open)*
 
 ---
 
-## Using with Tailscale (persistent, no token fiddling)
+## Using with Tailscale HTTPS
 
-Tailscale gives every device a stable private IP across networks.
+Tailscale's [HTTPS feature](https://tailscale.com/kb/1153/enabling-https) gives every device a stable `*.ts.net` HTTPS URL — no public exposure, no tunnel relay.
 
 ```bash
-# Both devices enrolled in the same Tailscale network
-# PC Tailscale IP example: 100.64.0.5
-
-voice-bridge --host 0.0.0.0
+# Enable HTTPS in Tailscale admin, then:
+BRIDGE_ALLOWED_ORIGIN=* voice-bridge --host 0.0.0.0
 ```
 
-Open on phone:
+Open on phone (replace with your machine's Tailscale HTTPS URL):
 
 ```
-http://100.64.0.5:8787/?token=<token>
+https://my-pc.tail1234.ts.net:8787/?token=<token>
 ```
 
-No `BRIDGE_ALLOWED_ORIGIN` change needed — Tailscale traffic arrives as a LAN IP.
+Microphone works because the origin is HTTPS. Traffic stays within your Tailscale network.
 
 ---
 
@@ -105,7 +109,7 @@ No `BRIDGE_ALLOWED_ORIGIN` change needed — Tailscale traffic arrives as a LAN 
 
 | Env var | Description |
 |---------|-------------|
-| `BRIDGE_ALLOWED_ORIGIN` | Extra allowed WebSocket origin. Set to `*` to allow all (tunnels). |
+| `BRIDGE_ALLOWED_ORIGIN` | Extra allowed WebSocket origin. Set to `*` for any tunnel. |
 
 ---
 

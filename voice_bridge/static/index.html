@@ -859,6 +859,7 @@ function connect() {
   };
 
   ws.onclose = (evt) => {
+    resetAssistantStreamingState({ finalize: true });
     setStatus('', 'Disconnected');
     micBtn.disabled = true;
     textInput.disabled = true;
@@ -880,7 +881,9 @@ function connect() {
     reconnectTimer = setTimeout(connect, 3000);
   };
 
-  ws.onerror = () => {};
+  ws.onerror = () => {
+    resetAssistantStreamingState({ finalize: true });
+  };
 }
 
 function handleMessage(msg) {
@@ -1352,6 +1355,21 @@ function applyMessageGrouping(el, role, timeMs) {
 let currentAssistantEl = null;
 let currentTextSpan = null;
 
+function resetAssistantStreamingState({ finalize = false } = {}) {
+  if (finalize) {
+    finalizeAssistantMessage();
+    return;
+  }
+
+  if (currentTextSpan && currentTextSpan._renderTimer) {
+    clearTimeout(currentTextSpan._renderTimer);
+    currentTextSpan._renderTimer = null;
+  }
+
+  currentAssistantEl = null;
+  currentTextSpan = null;
+}
+
 function createAssistantMessage() {
   const timeMs = Date.now();
   const el = document.createElement('div');
@@ -1504,7 +1522,13 @@ function formatInlineMarkdown(text) {
     return token;
   });
 
-  html = html.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  html = html.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label, rawUrl) => {
+    const safeUrl = sanitizeLinkUrl(rawUrl);
+    if (!safeUrl) {
+      return label;
+    }
+    return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+  });
   html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
 
   codeTokens.forEach((tokenHtml, idx) => {
@@ -1512,6 +1536,19 @@ function formatInlineMarkdown(text) {
   });
 
   return html;
+}
+
+function sanitizeLinkUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl, window.location.href);
+    const allowedProtocols = new Set(['http:', 'https:', 'mailto:']);
+    if (!allowedProtocols.has(parsed.protocol)) {
+      return null;
+    }
+    return parsed.href;
+  } catch (err) {
+    return null;
+  }
 }
 
 function renderMarkdownLines(text) {

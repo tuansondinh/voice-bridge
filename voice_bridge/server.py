@@ -751,6 +751,15 @@ class BridgeSession:
         except Exception as exc:
             _log(f"Error streaming Claude response: {exc}")
             await tts_queue.put(None)
+            # Send what we have so far even if there was an error
+            response_text = "".join(full_response)
+            await self._send_json(
+                {
+                    "type": "assistant_done",
+                    "text": response_text,
+                    "session_id": self._current_session_id,
+                }
+            )
         finally:
             await tts_task
 

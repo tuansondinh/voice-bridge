@@ -90,27 +90,6 @@ body {
   background: #223255;
 }
 
-.status {
-  display: flex;
-  align-items: center;
-}
-
-.status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #666;
-  transition: background 0.3s;
-}
-
-.status-dot.connected { background: var(--success); }
-.status-dot.recording { background: var(--accent); animation: pulse 1s infinite; }
-.status-dot.processing { background: #f59e0b; animation: pulse 0.5s infinite; }
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
-}
 
 /* Chat area */
 .chat {
@@ -1231,9 +1210,6 @@ body {
   <button class="hamburger-btn topbar-btn" id="drawerToggle" type="button" title="Chat history">☰</button>
   <h1>Voice Bridge</h1>
   <div class="header-right">
-    <div class="status">
-      <div class="status-dot" id="statusDot"></div>
-    </div>
     <div class="header-actions">
       <select class="model-select" id="modelSelect" title="Switch Claude model">
         <option value="sonnet">Sonnet</option>

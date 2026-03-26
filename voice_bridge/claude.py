@@ -263,12 +263,14 @@ class ClaudeSession:
                         }
                 if getattr(msg, "tool_use_result", None):
                     tool_result = msg.tool_use_result
-                    yield {
-                        "type": "tool_result",
-                        "tool_use_id": tool_result.get("tool_use_id") or msg.parent_tool_use_id,
-                        "content": _stringify_tool_result_content(tool_result.get("content")),
-                        "is_error": bool(tool_result.get("is_error")),
-                    }
+                    # Only process if tool_result is a dict (not a string or other type)
+                    if isinstance(tool_result, dict):
+                        yield {
+                            "type": "tool_result",
+                            "tool_use_id": tool_result.get("tool_use_id") or msg.parent_tool_use_id,
+                            "content": _stringify_tool_result_content(tool_result.get("content")),
+                            "is_error": bool(tool_result.get("is_error")),
+                        }
 
     async def send_message_with_images(
         self, text: str, images: list[dict[str, Any]]

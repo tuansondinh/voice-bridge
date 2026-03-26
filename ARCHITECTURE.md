@@ -32,6 +32,7 @@ voice_bridge/
 ├── __main__.py          # Entry point: argument parsing & server startup
 ├── server.py            # FastAPI app, BridgeSession class, WebSocket logic
 ├── claude.py            # Claude Agent SDK client
+├── sessions.py          # Session REST API router (list, get messages, rename, delete)
 ├── stt.py               # Whisper.cpp speech-to-text
 ├── tts.py               # Kokoro text-to-speech (not used in bridge)
 ├── audio.py             # Low-level audio utilities & VAD model loader
@@ -104,6 +105,7 @@ Manages a single phone-to-PC voice session. Key aspects:
   - Auth: token query parameter validation
   - Origin: CORS-like validation (localhost, LAN IP, tunnel origins)
   - Single-session enforcement: New connection closes previous one
+  - `resume` query param: Auto-resume a previous session by ID
 
 #### Globals:
 - `_models`: Dict holding loaded VAD, Whisper, and TTS instances
@@ -111,7 +113,30 @@ Manages a single phone-to-PC voice session. Key aspects:
 - `AUTH_TOKEN`: 64-character hex token generated at startup
 - `_BRIDGE_MODEL`: Claude model name (set by `set_bridge_model()` at startup)
 
-### 3. `claude.py` — Claude Agent SDK Client
+### 3b. `sessions.py` — REST API for Session Management
+
+Provides REST endpoints for querying and managing sessions stored by the Claude Agent SDK.
+
+**Key endpoints:**
+- `GET /api/sessions` — List all sessions tagged with `"voice-bridge"`
+  - Query params: `token` (auth), `limit` (default 50), `offset` (default 0)
+  - Returns: Array of session objects with `{id, created_at, title, tags}`
+- `GET /api/sessions/{id}/messages` — Get normalized messages from a session
+  - Query params: `token` (auth), `limit` (default 50), `offset` (default 0)
+  - Returns: Array of messages with `{role: "user"|"assistant", text, tool_calls}`
+- `PUT /api/sessions/{id}` — Rename a session
+  - Query params: `token` (auth)
+  - Body: `{"title": "..."}` (JSON)
+  - Returns: Updated session object
+- `DELETE /api/sessions/{id}` — Delete a session JSONL file
+  - Query params: `token` (auth)
+  - Returns: `{"deleted": true}`
+
+**Session tagging:**
+- All new sessions are automatically tagged with `"voice-bridge"` after the first response
+- List/GET/PUT/DELETE endpoints filter by this tag to prevent exposing unrelated Claude CLI sessions
+
+### 3. `claude.py` — Claude Agent SDK Client (updated)
 
 Wraps the `claude-agent-sdk` Python package for multi-turn conversations.
 The SDK bundles the Claude Code CLI internally — no subprocess management
@@ -130,6 +155,7 @@ or JSON stdout parsing is needed.
 - Configures `ClaudeAgentOptions` with `allowed_tools=[]` (chat-only, no
   file/bash access), `permission_mode="acceptEdits"`, `max_turns=100`
 - Accepts `model` parameter (default: `"sonnet"`) passed from `--model` flag
+- Accepts `resume: str | None` parameter for session resumption (passed to SDK's context replay)
 - Uses `async with ClaudeSDKClient(options)` as persistent session
 - Calls `client.query(text)` then streams `client.receive_response()`
 - Extracts text from `AssistantMessage` / `TextBlock` objects
@@ -225,13 +251,15 @@ Wraps pywhispercpp for STT. Key design:
 - `{"type": "vad_state", "speaking": bool}` — Server → Phone: VAD activity
 - `{"type": "transcript", "text": "..."}` — Server → Phone: recognized speech
 - `{"type": "assistant_chunk", "text": "..."}` — Server → Phone: Claude response chunk
-- `{"type": "assistant_done", "text": "..."}` — Server → Phone: full response (for replay)
+- `{"type": "assistant_done", "text": "...", "session_id": "uuid|null"}` — Server → Phone: full response (for replay) + session ID
 - `{"type": "tts_start"}` — Server → Phone: TTS audio beginning
 - `{"type": "tts_end"}` — Server → Phone: TTS audio finished
 - `{"type": "text_message", "text": "..."}` — Phone → Server: typed text
 - `{"type": "stop_tts"}` — Phone → Server: interrupt TTS
 - `{"type": "vad_reset"}` — Phone → Server: flush VAD state (switch to push mode)
 - `{"type": "playback_done"}` — Phone → Server: client finished playing TTS
+- `{"type": "switch_session", "session_id": "uuid|null"}` — Phone → Server: switch to different session (or null for new)
+- `{"type": "session_switched", "session_id": "uuid|null"}` — Server → Phone: session switched successfully
 
 **Audio frames (binary):**
 - 16-bit signed integer PCM at 16 kHz, mono
@@ -306,12 +334,35 @@ playback_done message → server clears _tts_active
 - New WebSocket connection → closes previous session
 - Prevents multiple phones connecting simultaneously
 
+### Session Resumption
+
+- WebSocket endpoint accepts `resume=<session_id>` query param
+- Passed to `ClaudeSession(resume=...)` which enables SDK-level context replay
+- Frontend stores current session ID in `localStorage` for auto-reconnect on page reload
+- `switch_session` WS message allows switching between existing sessions mid-call
+- Session ID is discovered from SDK after first response, then tracked as `_current_session_id`
+
+### Session Storage & Tagging
+
+- Sessions persist in `~/.claude/projects/<cwd>/` as JSONL files (SDK default storage)
+- Each session automatically tagged with `"voice-bridge"` tag after first response
+- Tags prevent leaking unrelated Claude CLI sessions through the REST API
+- Frontend queries `/api/sessions` to list and display session history
+
+### Session Switching
+
+- `switch_session` WS message triggers `_switch_session()` method
+- Acquires `_response_lock`, cancels active TTS + Claude, drains queues
+- Creates new `ClaudeSession` (potentially with resume ID)
+- Sends `session_switched` confirmation to client
+
 ### Graceful Shutdown
 
 1. Reader task finishes (WebSocketDisconnect)
 2. Processor/text tasks cancelled
 3. Finally block: Claude SDK client cancelled, TTS task cancelled
 4. Session marked as inactive
+5. Session automatically tagged as `"voice-bridge"` if not already tagged
 
 ## Model Loading & Startup
 
@@ -442,6 +493,76 @@ Key test scenarios:
 - Mic auto-mutes during TTS playback (barge-in disabled by design)
 - If hearing echo from speakers: reduce phone volume or move away from speaker
 
+## REST API Reference
+
+All endpoints require `token` query parameter for authentication.
+
+### Sessions List
+```
+GET /api/sessions?token=<token>&limit=50&offset=0
+```
+
+Response:
+```json
+[
+  {
+    "id": "uuid",
+    "created_at": "2026-03-26T10:30:00Z",
+    "title": "Optional custom title",
+    "tags": ["voice-bridge"]
+  }
+]
+```
+
+### Get Session Messages
+```
+GET /api/sessions/{id}/messages?token=<token>&limit=50&offset=0
+```
+
+Response:
+```json
+[
+  {
+    "role": "user",
+    "text": "What is the weather?",
+    "tool_calls": []
+  },
+  {
+    "role": "assistant",
+    "text": "I don't have access to real-time weather data...",
+    "tool_calls": []
+  }
+]
+```
+
+### Rename Session
+```
+PUT /api/sessions/{id}?token=<token>
+Content-Type: application/json
+
+{"title": "New session title"}
+```
+
+Response:
+```json
+{
+  "id": "uuid",
+  "created_at": "2026-03-26T10:30:00Z",
+  "title": "New session title",
+  "tags": ["voice-bridge"]
+}
+```
+
+### Delete Session
+```
+DELETE /api/sessions/{id}?token=<token>
+```
+
+Response:
+```json
+{"deleted": true}
+```
+
 ## Future Enhancements
 
 Possible improvements:
@@ -449,5 +570,4 @@ Possible improvements:
 - Barge-in detection (interrupt TTS on strong speech)
 - Voice wake-word detection (always-listening mode)
 - Faster models (Tiny Whisper, DiT for faster TTS)
-- Session persistence (resume across restarts)
 - Multi-user support (multiple concurrent sessions)

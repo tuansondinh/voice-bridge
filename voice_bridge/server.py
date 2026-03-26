@@ -26,6 +26,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from voice_bridge.audio import load_vad_model
 from voice_bridge.claude import ClaudeSession
+from voice_bridge.sessions import router as sessions_router
 from voice_bridge.tts import SAMPLE_RATE as TTS_SAMPLE_RATE
 from voice_bridge.tts import BufferedTTSEngine
 from voice_bridge.vad import RemoteVADProcessor
@@ -179,6 +180,7 @@ TAILSCALE_HOSTNAME: str | None = _get_tailscale_hostname()
 # ---------------------------------------------------------------------------
 
 app = FastAPI(title="Voice Bridge", docs_url=None, redoc_url=None)
+app.include_router(sessions_router)
 
 # How long to wait for continuation speech after a VAD segment (seconds).
 # Mirrors the MCP server's _CONTINUATION_RESPONSE_TIMEOUT.
@@ -210,7 +212,7 @@ class BridgeSession:
     - A processor task that reads from those queues and runs STT/Claude/TTS.
     """
 
-    def __init__(self, ws: WebSocket) -> None:
+    def __init__(self, ws: WebSocket, resume: str | None = None) -> None:
         self.ws = ws
         self._vad_processor = RemoteVADProcessor(
             _models["vad"],
@@ -232,7 +234,10 @@ class BridgeSession:
         # ClaudeSession is created here but not yet connected — connect() is
         # called in run() so that the SDK client stays alive for the full
         # session lifetime (preserving multi-turn conversation context).
-        self._claude = ClaudeSession(model=_BRIDGE_MODEL)
+        self._claude = ClaudeSession(model=_BRIDGE_MODEL, resume=resume)
+        # Track the active SDK session ID (None until first message completes).
+        # When resuming an existing session this is pre-set to that session ID.
+        self._current_session_id: str | None = resume
         self._tts_task: asyncio.Task | None = None
         self._stop_tts = asyncio.Event()
         self._response_lock = asyncio.Lock()  # serializes voice + text → Claude
@@ -248,6 +253,9 @@ class BridgeSession:
         # audio_queue holds raw bytes; control_queue holds parsed dicts
         self._audio_queue: asyncio.Queue[bytes] = asyncio.Queue()
         self._control_queue: asyncio.Queue[dict] = asyncio.Queue()
+        self._active_response_task: asyncio.Task | None = None
+        self._abort_response_requested: bool = False
+        self._push_to_talk_active: bool = False
 
     async def run(self) -> None:
         """Main session loop: run reader and processor tasks concurrently."""
@@ -263,11 +271,23 @@ class BridgeSession:
         text_task = asyncio.create_task(self._text_processor_loop())
 
         try:
-            # Wait for either task to finish (disconnect or fatal error)
-            done, pending = await asyncio.wait(
-                [reader_task, processor_task, text_task],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+            while True:
+                try:
+                    # Wait for either task to finish (disconnect or fatal error)
+                    done, pending = await asyncio.wait(
+                        [reader_task, processor_task, text_task],
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    break
+                except asyncio.CancelledError:
+                    if self._abort_response_requested:
+                        current = asyncio.current_task()
+                        if current is not None:
+                            current.uncancel()
+                        _log("Suppressed session cancellation during client abort")
+                        continue
+                    raise
+
             # Cancel the other tasks
             for task in pending:
                 task.cancel()
@@ -307,6 +327,7 @@ class BridgeSession:
                         data = _json.loads(message["text"])
                         # Handle stop_tts here directly so it's never delayed
                         if data.get("type") == "stop_tts":
+                            self._abort_response_requested = True
                             self._stop_tts.set()
                             self._tts.stop()
                             self._claude.cancel()
@@ -321,6 +342,24 @@ class BridgeSession:
                             while not self._audio_queue.empty():
                                 self._audio_queue.get_nowait()
                             _log("VAD reset — flushed buffers")
+                        elif data.get("type") == "push_to_talk_start":
+                            self._push_to_talk_active = True
+                            self._vad_processor.reset()
+                            self._pending_segments.clear()
+                            self._continuation_deadline = None
+                            while not self._audio_queue.empty():
+                                self._audio_queue.get_nowait()
+                            _log("Push-to-talk started")
+                        elif data.get("type") == "push_to_talk_end":
+                            self._push_to_talk_active = False
+                            utterance = self._vad_processor.finalize()
+                            if utterance is not None:
+                                await self._transcribe_and_accumulate(utterance)
+                            if self._pending_segments:
+                                await self._flush_accumulated_segments()
+                            else:
+                                self._continuation_deadline = None
+                            _log("Push-to-talk ended")
                         elif data.get("type") == "playback_done":
                             # Client finished playing all buffered TTS audio.
                             # Now safe to clear _tts_active so normal VAD resumes.
@@ -329,6 +368,10 @@ class BridgeSession:
                             _log("Client playback complete — TTS active cleared")
                         elif data.get("type") == "ping":
                             await self._send_json({"type": "pong"})
+                        elif data.get("type") == "switch_session":
+                            asyncio.create_task(
+                                self._switch_session(data.get("session_id"))
+                            )
                         else:
                             await self._control_queue.put(data)
                     except _json.JSONDecodeError:
@@ -349,7 +392,8 @@ class BridgeSession:
                 except asyncio.TimeoutError:
                     # No audio arrived — check if continuation deadline expired.
                     if (
-                        self._continuation_deadline is not None
+                        not self._push_to_talk_active
+                        and self._continuation_deadline is not None
                         and time.monotonic() > self._continuation_deadline
                         and self._pending_segments
                     ):
@@ -368,7 +412,7 @@ class BridgeSession:
                     text = data.get("text", "").strip()
                     if text:
                         _log(f"Text input: {text[:80]}...")
-                        await self._stream_claude_response(text)
+                        await self._run_response_task(text)
         except asyncio.CancelledError:
             pass
         except Exception as exc:
@@ -388,6 +432,8 @@ class BridgeSession:
 
         # Check if continuation deadline has expired (user stopped talking).
         if (
+            not self._push_to_talk_active
+            and
             self._continuation_deadline is not None
             and time.monotonic() > self._continuation_deadline
             and self._pending_segments
@@ -439,9 +485,13 @@ class BridgeSession:
             _log(f"Segment accumulated: {text}")
 
         if self._pending_segments:
-            # Reset continuation deadline — wait for more speech
-            self._continuation_deadline = time.monotonic() + _CONTINUATION_TIMEOUT
-            _log(f"Waiting up to {_CONTINUATION_TIMEOUT}s for continuation…")
+            if self._push_to_talk_active:
+                self._continuation_deadline = None
+                _log("Waiting for push-to-talk release…")
+            else:
+                # Reset continuation deadline — wait for more speech
+                self._continuation_deadline = time.monotonic() + _CONTINUATION_TIMEOUT
+                _log(f"Waiting up to {_CONTINUATION_TIMEOUT}s for continuation…")
 
     async def _flush_accumulated_segments(self) -> None:
         """Join all accumulated segments and send to Claude."""
@@ -458,7 +508,39 @@ class BridgeSession:
         await self._send_json({"type": "transcript", "text": text})
 
         # Send to Claude and stream response with incremental TTS
-        await self._stream_claude_response(text)
+        await self._run_response_task(text)
+
+    async def _run_response_task(self, user_text: str) -> None:
+        """Run the active Claude response in a cancelable task."""
+        task = asyncio.create_task(self._stream_claude_response(user_text))
+        self._active_response_task = task
+        try:
+            await task
+        except asyncio.CancelledError:
+            if self._abort_response_requested or self._stop_tts.is_set():
+                current = asyncio.current_task()
+                if current is not None:
+                    current.uncancel()
+                _log("Active Claude response task aborted by client")
+                return
+            _log("Active Claude response task cancelled")
+            raise
+        finally:
+            if self._active_response_task is task:
+                self._active_response_task = None
+
+    async def _reset_claude_after_abort(self) -> None:
+        """Reconnect the SDK client after an aborted turn.
+
+        A clean reconnect prevents delayed output from a stopped turn from
+        surfacing on the next user message while keeping the websocket alive.
+        """
+        try:
+            await self._claude.close()
+            await self._claude.connect()
+            _log("Claude SDK client reset after abort")
+        except Exception as exc:
+            _log(f"Claude SDK reset error after abort: {exc}")
 
     async def _stream_claude_response(self, user_text: str) -> None:
         """Send to Claude, stream text to phone, and do incremental TTS."""
@@ -476,6 +558,7 @@ class BridgeSession:
             await self._send_json({"type": "tts_stop"})
             _log("Cancelled previous TTS before new response")
 
+        self._abort_response_requested = False
         self._stop_tts.clear()
         full_response: list[str] = []
         sentence_buffer = ""
@@ -550,11 +633,62 @@ class BridgeSession:
             await tts_queue.put(None)
 
             response_text = "".join(full_response)
+            aborted = self._abort_response_requested or self._stop_tts.is_set()
+
+            if aborted:
+                await self._reset_claude_after_abort()
+                _log("Claude response aborted by client")
+                return
+
+            # Tag the session as "voice-bridge" after every completed response.
+            # The SDK's list_sessions only scans the last 64KB of each JSONL
+            # file for metadata (including the tag entry). Because resumed
+            # sessions accumulate new content after the tag, the tag entry can
+            # fall outside the scan window. Re-tagging after every response
+            # keeps the tag near the end of the file and visible to list_sessions.
+            if response_text:
+                try:
+                    import os as _os
+                    from claude_agent_sdk import list_sessions, tag_session
+                    if self._current_session_id is None:
+                        # New session — discover the ID from the most recently
+                        # modified session file (the one just created by the SDK).
+                        recent = list_sessions(directory=_os.getcwd(), limit=1)
+                        if recent:
+                            self._current_session_id = recent[0].session_id
+                            _log(f"Discovered new session: {self._current_session_id}")
+                    if self._current_session_id:
+                        tag_session(
+                            self._current_session_id,
+                            "voice-bridge",
+                            directory=_os.getcwd(),
+                        )
+                        _log(f"Tagged session: {self._current_session_id}")
+                except Exception as exc:
+                    _log(f"Session tagging error (ignored): {exc}")
+
             await self._send_json(
-                {"type": "assistant_done", "text": response_text}
+                {
+                    "type": "assistant_done",
+                    "text": response_text,
+                    "session_id": self._current_session_id,
+                }
             )
             _log(f"Claude responded: {response_text[:100]}...")
 
+        except asyncio.CancelledError:
+            if self._abort_response_requested or self._stop_tts.is_set():
+                _log("Claude response stream aborted by client")
+                self._stop_tts.set()
+                self._tts.stop()
+                await tts_queue.put(None)
+                await self._reset_claude_after_abort()
+                return
+            _log("Claude response stream cancelled")
+            self._stop_tts.set()
+            self._tts.stop()
+            await tts_queue.put(None)
+            raise
         except Exception as exc:
             _log(f"Error streaming Claude response: {exc}")
             await tts_queue.put(None)
@@ -647,6 +781,63 @@ class BridgeSession:
             # This ensures "stop" barge-in works during client-side audio
             # playback (server finishes sending audio before client finishes
             # playing it).
+
+    async def _switch_session(self, session_id: str | None) -> None:
+        """Switch to a different Claude session (or start a fresh one).
+
+        Acquires ``_response_lock`` to prevent concurrent Claude interactions
+        during the switch. Cancels any in-flight response + TTS, drains all
+        queues, then creates and connects a new ClaudeSession (with optional
+        resume). Sends ``session_switched`` to the frontend when done.
+
+        Parameters
+        ----------
+        session_id:
+            The SDK session ID to resume, or ``None`` to start a new session.
+        """
+        _log(f"Switching session → {session_id!r}")
+        async with self._response_lock:
+            # Cancel in-flight Claude response and TTS
+            self._abort_response_requested = True
+            self._claude.cancel()
+            await self._claude.close()
+            self._stop_tts.set()
+            self._tts.stop()
+            self._tts_active = False
+            self._barge_in_buffer = []
+
+            # Cancel any active response task
+            if (
+                self._active_response_task is not None
+                and not self._active_response_task.done()
+            ):
+                self._active_response_task.cancel()
+                self._active_response_task = None
+
+            # Drain all queues
+            while not self._audio_queue.empty():
+                self._audio_queue.get_nowait()
+            while not self._control_queue.empty():
+                self._control_queue.get_nowait()
+            self._pending_segments.clear()
+            self._continuation_deadline = None
+
+            # Create and connect new ClaudeSession
+            self._claude = ClaudeSession(model=_BRIDGE_MODEL, resume=session_id)
+            try:
+                await self._claude.connect()
+            except Exception as exc:
+                _log(f"Resume failed for {session_id!r}, falling back to new session: {exc}")
+                self._claude = ClaudeSession(model=_BRIDGE_MODEL, resume=None)
+                await self._claude.connect()
+                session_id = None
+
+            self._current_session_id = session_id
+            # Reset stop event so new responses can proceed
+            self._stop_tts.clear()
+
+        await self._send_json({"type": "session_switched", "session_id": session_id})
+        _log(f"Session switched to {session_id!r}")
 
     async def _send_json(self, data: dict) -> None:
         """Send a JSON message to the phone, ignoring errors."""
@@ -753,8 +944,22 @@ async def health():
 
 
 @app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket, token: str = Query("")):
-    """WebSocket endpoint for voice communication."""
+async def websocket_endpoint(
+    ws: WebSocket,
+    token: str = Query(""),
+    resume: str = Query(""),
+):
+    """WebSocket endpoint for voice communication.
+
+    Parameters
+    ----------
+    token:
+        Auth token — must match ``AUTH_TOKEN``.
+    resume:
+        Optional SDK session ID to resume on connect. The frontend stores the
+        last active session ID in ``localStorage`` and passes it here so
+        Claude's conversation context is restored on page reload.
+    """
     global _active_session
 
     # Auth check
@@ -800,7 +1005,9 @@ async def websocket_endpoint(ws: WebSocket, token: str = Query("")):
     await ws.accept()
     _log("WebSocket connected")
 
-    session = BridgeSession(ws)
+    # Pass resume session ID (empty string → None → new session)
+    resume_id: str | None = resume.strip() or None
+    session = BridgeSession(ws, resume=resume_id)
     _active_session = session
 
     try:

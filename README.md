@@ -136,6 +136,28 @@ The `.ts.net` origin is automatically added to the WebSocket allowlist. Traffic 
 
 ---
 
+## Sessions & Chat History
+
+voice-bridge automatically saves all conversations as sessions in the Claude Agent SDK's local storage. The mobile UI includes a slide-out **Sessions drawer** (tap the `☰` hamburger icon) where you can:
+
+- **View all past sessions** — titles, creation timestamps, relative times ("2 hours ago")
+- **Switch sessions** — tap any session to resume its conversation context
+- **Create new session** — tap the "+ New" button to start a fresh conversation
+- **Rename sessions** — tap the `✎` edit icon to give a session a custom title
+- **Delete sessions** — tap the `✕` delete icon to remove a session
+- **Auto-resume** — the app remembers your last session and reopens it when you reload the page
+
+### Under the Hood
+
+- **Storage** — Sessions are stored as JSONL files in `~/.claude/projects/<cwd>/` (SDK default)
+- **Auto-tagging** — Each session is tagged with `"voice-bridge"` to prevent mixing with unrelated Claude CLI sessions
+- **REST API** — The server exposes `/api/sessions` endpoints for listing and managing sessions
+- **Resumption** — When you switch or resume a session, the SDK replays the context so Claude remembers the conversation
+
+The session drawer persists across browser reloads and WebSocket reconnects — your chat history is always accessible.
+
+---
+
 ## Alternative: Cloudflare Tunnel
 
 [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/) creates a free, no-login HTTPS tunnel to your local server. No account required for quick tunnels.

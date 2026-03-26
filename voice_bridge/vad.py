@@ -91,6 +91,29 @@ class RemoteVADProcessor:
         self._frame_count = 0
         self._is_speaking = False
 
+    def finalize(self) -> np.ndarray | None:
+        """Force-finish the current utterance, if any speech has been captured.
+
+        This is used for push-to-talk release, where the client explicitly ends
+        the turn before the normal trailing-silence timeout has fired.
+        """
+        if not self._speech_chunks and len(self._buffer) == 0:
+            self.reset()
+            return None
+
+        chunks = list(self._speech_chunks)
+        if len(self._buffer) > 0:
+            chunks.append(self._buffer.copy())
+
+        if not chunks:
+            self.reset()
+            return None
+
+        utterance = np.concatenate(chunks)
+        _log(f"VAD: utterance finalized, {len(utterance)/SAMPLE_RATE:.2f}s")
+        self.reset()
+        return utterance
+
     def feed(self, pcm_16khz: np.ndarray) -> tuple[np.ndarray | None, bool]:
         """Feed audio samples and check for complete utterances.
 

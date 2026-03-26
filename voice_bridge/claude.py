@@ -91,9 +91,11 @@ class ClaudeSession:
         Other valid values: ``"opus"``, ``"haiku"``.
     """
 
-    def __init__(self, model: str = "sonnet") -> None:
+    def __init__(self, model: str = "sonnet", resume: str | None = None) -> None:
         auth_method = _check_auth()
         _log(f"Auth via {auth_method}")
+        if resume:
+            _log(f"Resuming session: {resume}")
 
         self._options = ClaudeAgentOptions(
             # `allowed_tools` defaults to [] in the SDK, which silently disables
@@ -102,6 +104,7 @@ class ClaudeSession:
             permission_mode="bypassPermissions",
             max_turns=100,
             model=model,
+            resume=resume,
         )
 
         # The SDK client — created once and kept alive for the session lifetime.
@@ -213,6 +216,14 @@ class ClaudeSession:
                                 "content": _stringify_tool_result_content(block.content),
                                 "is_error": bool(block.is_error),
                             }
+                    if getattr(msg, "tool_use_result", None):
+                        tool_result = msg.tool_use_result
+                        yield {
+                            "type": "tool_result",
+                            "tool_use_id": tool_result.get("tool_use_id") or msg.parent_tool_use_id,
+                            "content": _stringify_tool_result_content(tool_result.get("content")),
+                            "is_error": bool(tool_result.get("is_error")),
+                        }
 
         except Exception as exc:
             _log(f"Error communicating with Claude: {exc}")

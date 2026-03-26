@@ -91,6 +91,26 @@ def _make_user_message_with_blocks(blocks: list):
     return msg
 
 
+def _make_user_message_with_tool_use_result(
+    tool_use_id: str,
+    content: str | list[dict] | None,
+    is_error: bool | None = None,
+):
+    """Create a mock UserMessage using the tool_use_result field."""
+    from claude_agent_sdk import UserMessage
+
+    msg = MagicMock(spec=UserMessage)
+    msg.__class__ = UserMessage
+    msg.content = []
+    msg.parent_tool_use_id = tool_use_id
+    msg.tool_use_result = {
+        "tool_use_id": tool_use_id,
+        "content": content,
+        "is_error": is_error,
+    }
+    return msg
+
+
 def _make_result_message():
     """Create a mock ResultMessage (end-of-stream marker)."""
     from claude_agent_sdk import ResultMessage
@@ -355,6 +375,42 @@ class TestSendMessage:
                 "type": "tool_result",
                 "tool_use_id": "tool-1",
                 "content": "file contents",
+                "is_error": False,
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_yields_tool_result_events_from_tool_use_result_field(self):
+        """send_message() yields tool_result events from UserMessage.tool_use_result."""
+        messages = [
+            _make_user_message_with_tool_use_result("tool-9", "search results", False),
+            _make_result_message(),
+        ]
+
+        async def _fake_receive_response():
+            for msg in messages:
+                yield msg
+
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.query = AsyncMock()
+        mock_client.receive_response = _fake_receive_response
+
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test"}):
+            from voice_bridge.claude import ClaudeSession
+
+            with patch("voice_bridge.claude.ClaudeSDKClient", return_value=mock_client):
+                async with ClaudeSession() as session:
+                    chunks = []
+                    async for chunk in session.send_message("run a search"):
+                        chunks.append(chunk)
+
+        assert chunks == [
+            {
+                "type": "tool_result",
+                "tool_use_id": "tool-9",
+                "content": "search results",
                 "is_error": False,
             }
         ]

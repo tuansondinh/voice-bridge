@@ -55,6 +55,9 @@ AUTH_TOKEN = _load_or_create_token()
 
 # Sentence boundary pattern for incremental TTS
 _SENTENCE_RE = re.compile(r"(?<=[.!?\n])\s+")
+_FENCED_CODE_BLOCK_RE = re.compile(r"```[A-Za-z0-9_+-]*\n?[\s\S]*?```")
+_INLINE_CODE_RE = re.compile(r"`([^`]+)`")
+_MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 
 # Maximum chars to buffer before forcing a TTS chunk
 _MAX_SENTENCE_CHARS = 150
@@ -62,6 +65,30 @@ _MAX_SENTENCE_CHARS = 150
 
 def _log(msg: str) -> None:
     print(f"[bridge] {msg}", file=sys.stderr, flush=True)
+
+
+def _prepare_tts_text(text: str) -> str:
+    """Strip markdown/control syntax before sending text to TTS.
+
+    The UI still receives the original streamed markdown. This only cleans the
+    audio path so code fences, table separators, and formatting markers do not
+    get spoken as punctuation/noise.
+    """
+    if not text or not text.strip():
+        return ""
+
+    cleaned = _FENCED_CODE_BLOCK_RE.sub(" ", text)
+    cleaned = _MARKDOWN_LINK_RE.sub(r"\1", cleaned)
+    cleaned = _INLINE_CODE_RE.sub(r"\1", cleaned)
+    cleaned = re.sub(r"^\s{0,3}#{1,6}\s*", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"^\s*[-*+]\s+", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"^\s*\d+\.\s+", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"^\s*\|?[:\- ]+\|[:\-| ]*$", " ", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"\*\*(.*?)\*\*", r"\1", cleaned)
+    cleaned = re.sub(r"\*(.*?)\*", r"\1", cleaned)
+    cleaned = cleaned.replace("|", " ")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
 
 
 def _make_png(size: int, r: int, g: int, b: int) -> bytes:
@@ -478,14 +505,16 @@ class BridgeSession:
                     if len(sentences) > 1:
                         # All but last are complete sentences
                         for sentence in sentences[:-1]:
-                            sentence = sentence.strip()
+                            sentence = _prepare_tts_text(sentence.strip())
                             if sentence:
                                 _log(f"Queueing sentence for TTS: {sentence[:60]}")
                                 await tts_queue.put(sentence)
                         sentence_buffer = sentences[-1]
                     elif len(sentence_buffer) > _MAX_SENTENCE_CHARS:
                         # Force TTS on long chunks without sentence boundaries
-                        await tts_queue.put(sentence_buffer.strip())
+                        sentence = _prepare_tts_text(sentence_buffer.strip())
+                        if sentence:
+                            await tts_queue.put(sentence)
                         sentence_buffer = ""
                 elif event_type == "thinking":
                     await self._send_json(
@@ -512,7 +541,9 @@ class BridgeSession:
 
             # Flush remaining text (unless stopped)
             if not self._stop_tts.is_set() and sentence_buffer.strip():
-                await tts_queue.put(sentence_buffer.strip())
+                sentence = _prepare_tts_text(sentence_buffer.strip())
+                if sentence:
+                    await tts_queue.put(sentence)
 
             # Signal TTS consumer to finish
             await tts_queue.put(None)

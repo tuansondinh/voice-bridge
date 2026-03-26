@@ -207,3 +207,20 @@ class TestBridgeSessionModel:
                         BridgeSession(mock_ws)
                         # ClaudeSession should have been called with model="opus"
                         MockClaude.assert_called_once_with(model="opus")
+
+
+class TestTtsMarkdownSanitization:
+    def test_prepare_tts_text_strips_markdown_syntax(self):
+        """TTS should speak clean prose, not raw markdown/code fence syntax."""
+        from voice_bridge.server import _prepare_tts_text
+
+        text = (
+            "### Hello\n"
+            "- **Build** uses `hatchling`\n"
+            "- See [docs](https://example.com)\n"
+            "```python\nprint('hi')\n```\n"
+            "| col | val |\n"
+            "| --- | --- |\n"
+        )
+
+        assert _prepare_tts_text(text) == "Hello Build uses hatchling See docs col val"

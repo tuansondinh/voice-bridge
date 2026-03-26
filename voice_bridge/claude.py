@@ -1,53 +1,154 @@
-"""bridge_claude.py — Claude CLI subprocess wrapper for the voice bridge.
+"""claude.py — Claude Agent SDK client for the voice bridge.
 
-Spawns ``claude -p "text" --output-format stream-json`` per message,
-parses the streaming JSON output, and yields text chunks.
+Uses ``ClaudeSDKClient`` for persistent multi-turn conversations.
+The SDK bundles the Claude Code CLI internally — no subprocess management
+or JSON stdout parsing needed.
 
-Supports multi-turn conversations via --resume with a session ID
-captured from the first call's ``init`` event.
+Authentication is via environment variables:
+  - ``CLAUDE_CODE_OAUTH_TOKEN`` — Claude Max subscription (OAuth token)
+  - ``ANTHROPIC_API_KEY`` — Anthropic API key (pay-per-use billing)
+
+At least one of the above must be set before constructing ``ClaudeSession``.
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
-import shutil
+import os
 import sys
 from typing import AsyncGenerator
+
+try:
+    from claude_agent_sdk import (
+        AssistantMessage,
+        ClaudeAgentOptions,
+        ClaudeSDKClient,
+        TextBlock,
+    )
+except ImportError:
+    # SDK not installed — names are None so check_available() can return False
+    # and tests can patch them in.  The server startup check will catch this
+    # before ClaudeSession is actually constructed.
+    AssistantMessage = None  # type: ignore[assignment,misc]
+    ClaudeAgentOptions = None  # type: ignore[assignment,misc]
+    ClaudeSDKClient = None  # type: ignore[assignment,misc]
+    TextBlock = None  # type: ignore[assignment,misc]
 
 
 def _log(msg: str) -> None:
     print(f"[bridge-claude] {msg}", file=sys.stderr, flush=True)
 
 
-def _find_claude_binary() -> str | None:
-    """Find the claude CLI binary on PATH."""
-    return shutil.which("claude")
+def _check_auth() -> str:
+    """Return the auth method in use, or raise RuntimeError if none set."""
+    if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        return "CLAUDE_CODE_OAUTH_TOKEN"
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return "ANTHROPIC_API_KEY"
+    raise RuntimeError(
+        "No authentication credentials found. "
+        "Set CLAUDE_CODE_OAUTH_TOKEN (Claude Max subscription) "
+        "or ANTHROPIC_API_KEY (API billing) before starting voice-bridge. "
+        "For Claude Max: run `claude setup-token` and export the token."
+    )
 
 
 class ClaudeSession:
-    """Manages interaction with Claude CLI via subprocess.
+    """Manages a multi-turn conversation with Claude via the Agent SDK.
 
-    Each call to ``send_message`` spawns a new ``claude -p`` process.
-    Multi-turn context is maintained by capturing the ``session_id``
-    from the first call and passing ``--resume <session_id>`` to
-    subsequent calls.
+    ``ClaudeSDKClient`` is stateful — it preserves conversation context across
+    messages only when the same client instance is reused.  ``ClaudeSession``
+    is therefore an **async context manager** that connects the SDK client once
+    on entry and disconnects it on exit.  All ``send_message()`` calls within
+    the same ``async with`` block share the same client and thus the same
+    conversation context.
+
+    Usage::
+
+        async with ClaudeSession(model="sonnet") as session:
+            async for chunk in session.send_message("Hello"):
+                print(chunk, end="")
+            async for chunk in session.send_message("How are you?"):
+                print(chunk, end="")
+        # SDK client is disconnected here
+
+    The SDK is configured with an empty ``allowed_tools`` list so Claude is
+    restricted to chat-only mode — no file access or shell execution is
+    available through the voice bridge.
+
+    Parameters
+    ----------
+    model:
+        Model alias to pass to ``ClaudeAgentOptions``.  Defaults to
+        ``"sonnet"`` (maps to the latest Claude Sonnet release).
+        Other valid values: ``"opus"``, ``"haiku"``.
     """
 
-    def __init__(self) -> None:
-        self._claude_bin = _find_claude_binary()
-        if not self._claude_bin:
-            raise RuntimeError(
-                "Claude CLI not found on PATH. "
-                "Install it from https://docs.anthropic.com/en/docs/claude-code"
-            )
-        _log(f"Using Claude CLI: {self._claude_bin}")
+    def __init__(self, model: str = "sonnet") -> None:
+        auth_method = _check_auth()
+        _log(f"Auth via {auth_method}")
 
-        self._session_id: str | None = None
-        self._active_process: asyncio.subprocess.Process | None = None
+        self._options = ClaudeAgentOptions(
+            allowed_tools=[],           # chat-only — no file/bash access
+            permission_mode="bypassPermissions",
+            max_turns=100,
+            model=model,
+        )
+
+        # The SDK client — created once and kept alive for the session lifetime.
+        # It is entered (connected) via __aenter__ / connect() and exited via
+        # __aexit__ / close().  Access only after connect() has been called.
+        self._sdk_client: ClaudeSDKClient | None = None
+        # Reference to the currently active client exposed for cancel()
+        self._client: ClaudeSDKClient | None = None
+        # Flag to signal cancellation to the streaming loop
+        self._cancelled: bool = False
+
+    # ------------------------------------------------------------------
+    # Async context manager — connects/disconnects the SDK client once
+    # ------------------------------------------------------------------
+
+    async def __aenter__(self) -> "ClaudeSession":
+        await self.connect()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        await self.close()
+
+    async def connect(self) -> None:
+        """Enter the SDK client context manager (connect once).
+
+        Called automatically by ``async with ClaudeSession(...) as s``.
+        """
+        client = ClaudeSDKClient(options=self._options)
+        self._sdk_client = await client.__aenter__()
+        self._client = self._sdk_client
+        _log("SDK client connected")
+
+    async def close(self) -> None:
+        """Exit the SDK client context manager (disconnect).
+
+        Called automatically when exiting the ``async with`` block, or can be
+        called explicitly to shut down the session.
+        """
+        if self._sdk_client is not None:
+            try:
+                await self._sdk_client.__aexit__(None, None, None)
+                _log("SDK client disconnected")
+            except Exception as exc:
+                _log(f"SDK client close error (ignored): {exc}")
+            finally:
+                self._sdk_client = None
+                self._client = None
+
+    # ------------------------------------------------------------------
+    # Messaging
+    # ------------------------------------------------------------------
 
     async def send_message(self, text: str) -> AsyncGenerator[str, None]:
-        """Send text to Claude CLI, yield text chunks as they stream back.
+        """Send text to Claude and yield response text chunks incrementally.
+
+        The SDK client must be connected before calling this method (i.e., the
+        session must be used inside an ``async with`` block).
 
         Parameters
         ----------
@@ -62,115 +163,57 @@ class ClaudeSession:
         if not text.strip():
             return
 
-        cmd = [
-            self._claude_bin,
-            "--output-format", "stream-json",
-            "--verbose",
-            "--include-partial-messages",
-            "--dangerously-skip-permissions",
-            "--model", "sonnet",
-            "-p",
-        ]
+        if self._sdk_client is None:
+            _log("send_message() called but SDK client is not connected — skipping")
+            return
 
-        # Resume conversation if we have a session ID from a previous call
-        if self._session_id:
-            cmd.extend(["--resume", self._session_id])
-
-        # -- ends option parsing so text starting with '-' isn't treated as a flag
-        cmd.extend(["--", text])
-
+        self._cancelled = False
         _log(f"Sending to Claude: {text[:80]}...")
-        if self._session_id:
-            _log(f"Resuming session: {self._session_id}")
 
         try:
-            self._active_process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
+            client = self._sdk_client
+            await client.query(text)
 
-            assert self._active_process.stdout is not None
+            async for msg in client.receive_response():
+                if self._cancelled:
+                    break
 
-            async for line in self._active_process.stdout:
-                decoded = line.decode("utf-8", errors="replace").strip()
-                if not decoded:
-                    continue
+                if isinstance(msg, AssistantMessage):
+                    for block in msg.content:
+                        if isinstance(block, TextBlock):
+                            if block.text:
+                                yield block.text
 
-                try:
-                    event = json.loads(decoded)
-                except json.JSONDecodeError:
-                    continue
-
-                # Capture session ID from the init event (first call)
-                if (
-                    event.get("type") == "system"
-                    and event.get("subtype") == "init"
-                    and not self._session_id
-                ):
-                    self._session_id = event.get("session_id")
-                    _log(f"Captured session ID: {self._session_id}")
-
-                # Extract text from stream-json events
-                text_chunk = self._extract_text(event)
-                if text_chunk:
-                    yield text_chunk
-
-            await asyncio.wait_for(self._active_process.wait(), timeout=10)
-
-            if self._active_process.returncode != 0:
-                stderr_data = b""
-                if self._active_process.stderr:
-                    stderr_data = await self._active_process.stderr.read()
-                _log(
-                    f"Claude exited with code {self._active_process.returncode}: "
-                    f"{stderr_data.decode('utf-8', errors='replace')[:200]}"
-                )
-
-        except asyncio.TimeoutError:
-            _log("Claude CLI timed out")
-            if self._active_process:
-                self._active_process.kill()
         except Exception as exc:
             _log(f"Error communicating with Claude: {exc}")
-        finally:
-            self._active_process = None
 
     def cancel(self) -> None:
-        """Kill the active Claude process if running.
+        """Interrupt an in-flight response.
 
-        This does NOT destroy the session — the session ID is preserved
-        and the next ``send_message`` call will resume from where the
-        conversation left off (minus the interrupted response).
+        Sets the cancellation flag (checked in the streaming loop) and calls
+        ``interrupt()`` on the active SDK client if one exists.
         """
-        if self._active_process and self._active_process.returncode is None:
-            _log("Cancelling active Claude process")
-            self._active_process.kill()
-
-    @staticmethod
-    def _extract_text(event: dict) -> str | None:
-        """Extract text content from a stream-json event.
-
-        With ``--include-partial-messages``, the CLI emits ``stream_event``
-        wrappers around the Anthropic API streaming protocol.  We extract
-        incremental text from ``content_block_delta`` events for true
-        token-by-token streaming.  The ``assistant`` and ``result`` events
-        still contain the full text but are ignored to avoid duplication.
-        """
-        event_type = event.get("type")
-
-        # stream_event wraps the raw API streaming events
-        if event_type == "stream_event":
-            inner = event.get("event", {})
-            inner_type = inner.get("type")
-            if inner_type == "content_block_delta":
-                delta = inner.get("delta", {})
-                if delta.get("type") == "text_delta":
-                    return delta.get("text", "")
-
-        return None
+        self._cancelled = True
+        if self._client is not None:
+            _log("Interrupting active Claude SDK client")
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                loop.create_task(self._client.interrupt())
+            except Exception as exc:
+                _log(f"SDK interrupt error (ignored): {exc}")
 
     @staticmethod
     def check_available() -> bool:
-        """Check if the claude CLI is available on PATH."""
-        return _find_claude_binary() is not None
+        """Check if the claude_agent_sdk package is importable.
+
+        The SDK bundles the Claude Code CLI, so this is the only check needed —
+        no PATH lookup required.
+        """
+        try:
+            import importlib
+
+            loader = importlib.util.find_spec("claude_agent_sdk")
+            return loader is not None
+        except (ImportError, ValueError):
+            return False

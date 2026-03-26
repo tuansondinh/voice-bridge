@@ -41,19 +41,38 @@ def run_bridge() -> None:
     parser.add_argument(
         "--port", type=int, default=8787, help="Port (default: 8787)"
     )
+    parser.add_argument(
+        "--model",
+        default="sonnet",
+        help="Claude model to use (default: sonnet). Options: sonnet, opus, haiku",
+    )
     args = parser.parse_args()
 
-    # Check Claude CLI availability first
+    # Check claude_agent_sdk is importable — the SDK bundles its own CLI,
+    # so no PATH lookup is needed.
     from voice_bridge.claude import ClaudeSession
 
     if not ClaudeSession.check_available():
-        _log("ERROR: Claude CLI not found on PATH.")
-        _log("Install it from: https://docs.anthropic.com/en/docs/claude-code")
+        _log("ERROR: claude-agent-sdk is not installed.")
+        _log("Install it with: pip install claude-agent-sdk")
+        _log("Then set up auth:")
+        _log("  Claude Max (OAuth): claude setup-token  (then export CLAUDE_CODE_OAUTH_TOKEN)")
+        _log("  API billing:        export ANTHROPIC_API_KEY=sk-...")
+        sys.exit(1)
+
+    # Check auth credentials are present
+    import os as _os
+    if not _os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") and not _os.environ.get("ANTHROPIC_API_KEY"):
+        _log("ERROR: No authentication credentials found.")
+        _log("Set one of:")
+        _log("  CLAUDE_CODE_OAUTH_TOKEN — Claude Max subscription (run: claude setup-token)")
+        _log("  ANTHROPIC_API_KEY       — Anthropic API key (pay-per-use billing)")
         sys.exit(1)
 
     # Load models eagerly
-    from voice_bridge.server import AUTH_TOKEN, app, load_models
+    from voice_bridge.server import AUTH_TOKEN, app, load_models, set_bridge_model
 
+    set_bridge_model(args.model)
     load_models()
 
     # Print access URL

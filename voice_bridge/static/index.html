@@ -91,10 +91,8 @@ body {
 }
 
 .status {
-  font-size: 12px;
   display: flex;
   align-items: center;
-  gap: 6px;
 }
 
 .status-dot {
@@ -178,6 +176,17 @@ body {
 
 .message.user .timestamp {
   text-align: right;
+}
+
+.system-notice {
+  align-self: center;
+  font-size: 11px;
+  color: var(--text-dim);
+  opacity: 0.7;
+  padding: 4px 12px;
+  background: var(--surface);
+  border-radius: 10px;
+  margin: 4px 0;
 }
 
 .message.assistant .timestamp {
@@ -683,7 +692,7 @@ body {
   padding: 10px 16px;
   resize: none;
   outline: none;
-  min-height: 40px;
+  min-height: 48px;
   max-height: 120px;
   overflow-y: auto;
   line-height: 1.4;
@@ -703,13 +712,13 @@ body {
 }
 
 .send-btn {
-  min-width: 40px;
-  height: 40px;
-  border-radius: 20px;
+  min-width: 48px;
+  height: 48px;
+  border-radius: 24px;
   border: none;
   background: var(--accent);
   color: white;
-  font-size: 13px;
+  font-size: 14px;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -718,18 +727,18 @@ body {
   transition: opacity 0.2s, transform 0.1s;
   -webkit-tap-highlight-color: transparent;
   touch-action: manipulation;
-  padding: 0 14px;
+  padding: 0 18px;
   gap: 6px;
 }
 
 .voice-action-btn {
-  min-width: 40px;
-  height: 40px;
-  border-radius: 20px;
+  min-width: 48px;
+  height: 48px;
+  border-radius: 24px;
   border: 1px solid var(--border);
   background: var(--surface-hover);
   color: var(--text);
-  font-size: 13px;
+  font-size: 14px;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
@@ -738,7 +747,10 @@ body {
   transition: background 0.2s, border-color 0.2s, opacity 0.2s, transform 0.1s;
   -webkit-tap-highlight-color: transparent;
   touch-action: manipulation;
-  padding: 0 12px;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  padding: 0 16px;
   gap: 6px;
 }
 
@@ -755,6 +767,75 @@ body {
   border-color: var(--accent);
   background: rgba(233, 69, 96, 0.18);
   color: white;
+}
+
+.composer-recording-chip {
+  display: none;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: rgba(233, 69, 96, 0.12);
+  border: 1px solid rgba(233, 69, 96, 0.28);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.composer-recording-chip.visible {
+  display: flex;
+}
+
+.composer-recording-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 4px rgba(233, 69, 96, 0.14);
+  animation: pulse 1s infinite;
+  flex-shrink: 0;
+}
+
+.composer-recording-text {
+  min-width: 0;
+  font-weight: 600;
+}
+
+@media (max-width: 640px) {
+  .text-input-row {
+    gap: 6px;
+    align-items: center;
+  }
+
+  .composer-vad {
+    width: 10px;
+    height: 10px;
+  }
+
+  .text-input {
+    min-width: 0;
+    padding: 10px 12px;
+    font-size: 14px;
+  }
+
+  .voice-action-btn,
+  .send-btn {
+    min-width: 48px;
+    width: 48px;
+    padding: 0;
+    border-radius: 24px;
+    gap: 0;
+  }
+
+  .voice-action-label,
+  .send-btn-label {
+    display: none;
+  }
+
+  .voice-action-icon,
+  .send-btn-icon {
+    font-size: 15px;
+  }
 }
 
 .send-btn:disabled {
@@ -827,13 +908,6 @@ body {
 
 .send-btn.queue {
   background: #3b82f6;
-}
-
-.divider {
-  width: 100%;
-  height: 1px;
-  background: var(--border);
-  margin: 4px 0;
 }
 
 /* Loading overlay */
@@ -1020,9 +1094,124 @@ body {
   padding: 0 10px;
   flex-shrink: 0;
 }
+
+.model-select {
+  height: 36px;
+  border-radius: 18px;
+  border: 1px solid var(--border);
+  background: var(--surface-hover);
+  color: var(--text);
+  font-size: 13px;
+  padding: 0 8px 0 10px;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%238b8fa3'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  padding-right: 24px;
+}
+
+.model-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* Drop overlay for image drag-drop */
+.drop-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(233, 69, 96, 0.15);
+  border: 3px dashed var(--accent);
+  z-index: 1000;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  color: var(--accent);
+  pointer-events: none;
+}
+.drop-overlay.active { display: flex; }
+
+/* Image preview row above text input */
+.image-preview-row {
+  display: none;
+  gap: 8px;
+  padding: 4px 12px 0;
+  flex-wrap: wrap;
+}
+
+.image-preview-item {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.image-preview-item img { width: 100%; height: 100%; object-fit: cover; }
+
+.image-preview-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgba(0,0,0,0.7);
+  color: white;
+  border: none;
+  font-size: 11px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+/* Attach / image-picker button */
+.attach-btn {
+  width: 40px;
+  height: 48px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: color 0.2s, opacity 0.2s;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+  padding: 0;
+  border-radius: 8px;
+}
+
+.attach-btn:hover { color: var(--accent); }
+
+.attach-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.attach-btn.has-images { color: var(--accent); }
+
+/* Images embedded in chat messages */
+.message-image {
+  max-width: 240px;
+  max-height: 180px;
+  border-radius: 8px;
+  margin-top: 6px;
+  display: block;
+}
 </style>
 </head>
 <body>
+
+<div class="drop-overlay" id="dropOverlay">Drop images here</div>
 
 <div class="loading" id="loading">
   <div class="spinner"></div>
@@ -1044,9 +1233,13 @@ body {
   <div class="header-right">
     <div class="status">
       <div class="status-dot" id="statusDot"></div>
-      <span id="statusText">Disconnected</span>
     </div>
     <div class="header-actions">
+      <select class="model-select" id="modelSelect" title="Switch Claude model">
+        <option value="sonnet">Sonnet</option>
+        <option value="opus">Opus</option>
+        <option value="haiku">Haiku</option>
+      </select>
       <button class="topbar-btn" id="audioToggleBtn" type="button" title="Toggle audio playback">🔊</button>
       <button class="topbar-btn" id="keyboardBtn" type="button" title="Switch to text input">⌨</button>
     </div>
@@ -1058,6 +1251,7 @@ body {
 <button class="scroll-down-btn" id="scrollDownBtn" type="button" onclick="scrollToBottom()">↓ New messages</button>
 <div class="reconnect-toast" id="reconnectToast">Reconnected</div>
 
+<input type="file" id="imageFileInput" accept="image/*" multiple style="display:none">
 <div class="controls">
   <div id="voiceView" style="gap:12px; display:none">
     <button class="mic-btn" id="micBtn" disabled>
@@ -1075,10 +1269,21 @@ body {
       <button class="stop-btn" id="stopBtn" onclick="stopTTS()">Stop</button>
     </div>
   </div>
-  <div class="divider" id="textDivider"></div>
+  <div class="composer-recording-chip" id="composerRecordingChip" aria-live="polite">
+    <span class="composer-recording-dot" aria-hidden="true"></span>
+    <span class="composer-recording-text">Recording... release to send</span>
+  </div>
   <div class="queued-bar" id="queuedBar"></div>
+  <div class="image-preview-row" id="imagePreviewRow"></div>
   <div class="text-input-row" id="textInputRow">
     <div class="composer-vad" id="textVadIndicator" aria-hidden="true"></div>
+    <button class="attach-btn" id="attachBtn" type="button" title="Attach image" disabled>
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+        <circle cx="8.5" cy="8.5" r="1.5"/>
+        <polyline points="21 15 16 10 5 21"/>
+      </svg>
+    </button>
     <textarea
       class="text-input"
       id="textInput"
@@ -1122,6 +1327,30 @@ function unlockiOSAudio() {
   }).catch(() => {});
 }
 
+// Push notification state
+let notificationPermissionRequested = false;
+let activeNotification = null;
+
+function requestNotificationPermission() {
+  if (notificationPermissionRequested || !('Notification' in window)) return;
+  notificationPermissionRequested = true;
+  if (Notification.permission === 'default') Notification.requestPermission();
+}
+
+function notifyIfHidden(body) {
+  if (!document.hidden || !('Notification' in window) || Notification.permission !== 'granted') return;
+  if (activeNotification) activeNotification.close();
+  activeNotification = new Notification('Voice Bridge', {
+    body: body || 'Claude has responded',
+    tag: 'voice-bridge-response',
+  });
+  activeNotification.onclick = () => {
+    window.focus();
+    activeNotification.close();
+    activeNotification = null;
+  };
+}
+
 // Unlock on first user interaction
 let audioUnlocked = false;
 document.addEventListener('touchstart', function onTouch() {
@@ -1129,12 +1358,14 @@ document.addEventListener('touchstart', function onTouch() {
     audioUnlocked = true;
     unlockiOSAudio();
   }
+  requestNotificationPermission();
 }, { once: true });
 document.addEventListener('click', function onClick() {
   if (!audioUnlocked) {
     audioUnlocked = true;
     unlockiOSAudio();
   }
+  requestNotificationPermission();
 }, { once: true });
 
 // ---------------------------------------------------------------------------
@@ -1147,6 +1378,7 @@ let audioCtxPlayback = null;
 let workletNode = null;
 let micStream = null;
 let isRecording = false;
+let recordingGeneration = 0; // incremented to cancel an in-flight startRecording()
 let isTTSPlaying = false;
 let audioOffMode = localStorage.getItem('voiceBridgeAudioMode') === 'off';
 
@@ -1169,8 +1401,18 @@ let reconnectAttempts = 0;
 let reconnectTimer = null;
 let reconnectToastTimer = null;
 let wsGeneration = 0;
+let wsLeaseHeartbeat = null;
 const PLAYBACK_RATE = 24000;
 const JITTER_BUFFER_MS = 0;
+const WS_OWNER_KEY = 'voiceBridgeWsOwner';
+const WS_OWNER_TTL_MS = 5000;
+const WS_OWNER_HEARTBEAT_MS = 2000;
+const clientId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+// Image input state
+let pendingImages = []; // [{data: base64, media_type: string, name: string}]
+const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
+const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
 
 // DOM
 const chat = document.getElementById('chat');
@@ -1187,11 +1429,15 @@ const loading = document.getElementById('loading');
 const textInput = document.getElementById('textInput');
 const pushVoiceBtn = document.getElementById('pushVoiceBtn');
 const sendBtn = document.getElementById('sendBtn');
+const composerRecordingChip = document.getElementById('composerRecordingChip');
 const reconnectBanner = document.getElementById('reconnectBanner');
 const reconnectToast = document.getElementById('reconnectToast');
 const scrollDownBtn = document.getElementById('scrollDownBtn');
 const queuedBar = document.getElementById('queuedBar');
 const keyboardBtn = document.getElementById('keyboardBtn');
+const modelSelect = document.getElementById('modelSelect');
+const dropOverlay = document.getElementById('dropOverlay');
+const imagePreviewRow = document.getElementById('imagePreviewRow');
 // Drawer elements (defined early so handleMessage can reference them)
 const drawer = document.getElementById('drawer');
 
@@ -1229,7 +1475,9 @@ function updateSendButtonState() {
   sendBtn.title = 'Send message';
   label.textContent = 'Send';
   icon.textContent = '➤';
-  sendBtn.disabled = !ws || ws.readyState !== WebSocket.OPEN;
+  const connected = Boolean(ws && ws.readyState === WebSocket.OPEN);
+  sendBtn.disabled = !connected || (!textInput.value.trim() && !pendingImages.length);
+  document.getElementById('attachBtn').disabled = !connected;
 }
 
 function updatePushVoiceButtonState() {
@@ -1238,6 +1486,7 @@ function updatePushVoiceButtonState() {
   pushVoiceBtn.classList.toggle('recording', isRecording);
   pushVoiceBtn.querySelector('.voice-action-label').textContent = isRecording ? 'Release to stop' : 'Push (hold to talk)';
   pushVoiceBtn.querySelector('.voice-action-icon').textContent = isRecording ? '■' : '🎙';
+  composerRecordingChip.classList.toggle('visible', textMode && isRecording);
 }
 
 function setSendButtonBusy(isBusy) {
@@ -1319,6 +1568,71 @@ function syncModeLabel() {
   modeBtn.textContent = alwaysOnMode ? '🎙 Auto' : '🎙 Push';
 }
 
+function readWsOwnerLease() {
+  try {
+    const raw = localStorage.getItem(WS_OWNER_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+function isLeaseStale(lease) {
+  return !lease || typeof lease.ts !== 'number' || (Date.now() - lease.ts) > WS_OWNER_TTL_MS;
+}
+
+function writeWsOwnerLease() {
+  localStorage.setItem(WS_OWNER_KEY, JSON.stringify({ id: clientId, ts: Date.now() }));
+}
+
+function clearWsOwnerLease() {
+  const lease = readWsOwnerLease();
+  if (lease && lease.id === clientId) {
+    localStorage.removeItem(WS_OWNER_KEY);
+  }
+}
+
+function ensureWsOwnership({ force = false } = {}) {
+  const lease = readWsOwnerLease();
+  if (force || isLeaseStale(lease) || lease.id === clientId) {
+    writeWsOwnerLease();
+    return true;
+  }
+  return false;
+}
+
+function startWsLeaseHeartbeat() {
+  stopWsLeaseHeartbeat();
+  writeWsOwnerLease();
+  wsLeaseHeartbeat = setInterval(() => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    writeWsOwnerLease();
+  }, WS_OWNER_HEARTBEAT_MS);
+}
+
+function stopWsLeaseHeartbeat() {
+  if (wsLeaseHeartbeat) {
+    clearInterval(wsLeaseHeartbeat);
+    wsLeaseHeartbeat = null;
+  }
+}
+
+function setPassiveClientState() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  hideReconnectBanner();
+  reconnectAttempts = 0;
+  setStatus('', 'Inactive');
+  hint.textContent = 'Another tab or PWA instance is active';
+  micBtn.disabled = true;
+  textInput.disabled = true;
+  sendBtn.disabled = true;
+  pushVoiceBtn.disabled = true;
+  document.getElementById('attachBtn').disabled = true;
+}
+
 chat.addEventListener('scroll', () => {
   const atBottom = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 50;
   userScrolledUp = !atBottom;
@@ -1336,6 +1650,10 @@ function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
     return;
   }
+  if (!ensureWsOwnership()) {
+    setPassiveClientState();
+    return;
+  }
 
   const params = new URLSearchParams(window.location.search);
   const token = params.get('token') || '';
@@ -1350,6 +1668,7 @@ function connect() {
 
   socket.onopen = () => {
     if (socket !== ws || generation !== wsGeneration) return;
+    startWsLeaseHeartbeat();
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
@@ -1381,21 +1700,44 @@ function connect() {
     }
   };
 
-  socket.onclose = () => {
+  socket.onclose = (evt) => {
     if (socket !== ws || generation !== wsGeneration) return;
+    stopWsLeaseHeartbeat();
     ws = null;
     resetAssistantStreamingState({ finalize: true });
     queuedMessage = null;
     renderQueueBar();
+    clearPendingImages();
     setStatus('', 'Disconnected');
     micBtn.disabled = true;
     textInput.disabled = true;
+    document.getElementById('attachBtn').disabled = true;
     setSendButtonBusy(false);
     updatePushVoiceButtonState();
     sendBtn.disabled = true;
     stopRecording();
     loading.classList.add('hidden');
     removeTypingIndicator();
+
+    // Replaced by a newer connection — go passive, don't fight back.
+    if (evt.code === 4002) {
+      setPassiveClientState();
+      return;
+    }
+    // Server cooldown — retry once after cooldown expires.
+    if (evt.code === 4003) {
+      setPassiveClientState();
+      reconnectTimer = setTimeout(() => {
+        if (!ws || ws.readyState === WebSocket.CLOSED) connect();
+      }, 3500);
+      return;
+    }
+
+    if (!ensureWsOwnership()) {
+      setPassiveClientState();
+      return;
+    }
+
     reconnectAttempts += 1;
     hint.textContent = 'Connection lost';
     if (reconnectAttempts >= 5) {
@@ -1422,6 +1764,44 @@ function connect() {
   };
 }
 
+window.addEventListener('storage', (evt) => {
+  if (evt.key !== WS_OWNER_KEY) return;
+  const lease = readWsOwnerLease();
+  if (lease && lease.id !== clientId) {
+    // Another tab claimed ownership — stop heartbeat so our lease expires,
+    // but keep the WS alive. The server will send 4002 when that tab connects.
+    stopWsLeaseHeartbeat();
+    return;
+  }
+
+  if ((!lease || lease.id === clientId) && document.visibilityState === 'visible') {
+    connect();
+  }
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    // Don't force-claim ownership on visibility change — if another instance
+    // has a fresh lease, yield to it rather than starting a reconnect fight.
+    if (!ws || ws.readyState === WebSocket.CLOSED) {
+      if (ensureWsOwnership()) {
+        connect();
+      }
+    }
+    // Close any pending notification when the user returns to the tab
+    if (activeNotification) { activeNotification.close(); activeNotification = null; }
+    return;
+  }
+
+  stopWsLeaseHeartbeat();
+  clearWsOwnerLease();
+});
+
+window.addEventListener('pagehide', () => {
+  stopWsLeaseHeartbeat();
+  clearWsOwnerLease();
+});
+
 function handleMessage(msg) {
   switch (msg.type) {
     case 'ready':
@@ -1429,6 +1809,8 @@ function handleMessage(msg) {
       micBtn.disabled = false;
       textInput.disabled = false;
       setSendButtonBusy(false);
+      // Sync model dropdown to server's current model
+      if (msg.model) modelSelect.value = msg.model;
       // Fetch session list and restore history for the active session
       fetchSessions();
       if (currentSessionId) {
@@ -1449,6 +1831,21 @@ function handleMessage(msg) {
         startRecording();
       }
       updatePushVoiceButtonState();
+      break;
+
+    case 'model_switched':
+      modelSelect.value = msg.model;
+      setStatus('connected', 'Model: ' + msg.model);
+      break;
+
+    case 'session_started':
+      // Session file created — update ID and refresh sidebar immediately
+      // so the session appears before the response finishes.
+      if (msg.session_id && !currentSessionId) {
+        currentSessionId = msg.session_id;
+        localStorage.setItem('voiceBridgeSessionId', currentSessionId);
+      }
+      fetchSessions();
       break;
 
     case 'session_switched':
@@ -1525,6 +1922,7 @@ function handleMessage(msg) {
       if (!isTTSPlaying && !isPlayingAudio) {
         setStatus('connected', 'Connected');
         hint.textContent = alwaysOnMode ? 'Speak now' : 'Tap mic to speak';
+        if (!queuedMessage) notifyIfHidden('Claude has finished responding');
       }
       drainQueueIfIdle();
       break;
@@ -1590,6 +1988,10 @@ function handleMessage(msg) {
 async function startRecording() {
   if (isRecording) return;
 
+  // Stamp this invocation so we can detect if stopRecording() was called
+  // while we were awaiting getUserMedia / addModule below.
+  const generation = ++recordingGeneration;
+
   try {
     micStream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -1600,6 +2002,14 @@ async function startRecording() {
         autoGainControl: true,
       }
     });
+
+    // stopRecording() was called while getUserMedia was pending — release the
+    // mic track immediately and bail out so the iPhone indicator goes away.
+    if (generation !== recordingGeneration) {
+      micStream.getTracks().forEach(t => t.stop());
+      micStream = null;
+      return;
+    }
 
     audioCtxCapture = new AudioContext({ sampleRate: 16000 });
 
@@ -1628,6 +2038,15 @@ async function startRecording() {
     await audioCtxCapture.audioWorklet.addModule(url);
     URL.revokeObjectURL(url);
 
+    // stopRecording() was called while addModule was pending — clean up everything.
+    if (generation !== recordingGeneration) {
+      micStream.getTracks().forEach(t => t.stop());
+      micStream = null;
+      audioCtxCapture.close();
+      audioCtxCapture = null;
+      return;
+    }
+
     const source = audioCtxCapture.createMediaStreamSource(micStream);
     workletNode = new AudioWorkletNode(audioCtxCapture, 'pcm-processor');
 
@@ -1655,6 +2074,10 @@ async function startRecording() {
 }
 
 function stopRecording() {
+  // Always bump the generation so any in-flight startRecording() will abort
+  // itself and release the mic — this is what fixes the "mic stuck on" bug
+  // where the user releases PTT before the async getUserMedia/addModule finish.
+  recordingGeneration++;
   if (!isRecording) return;
 
   isRecording = false;
@@ -1793,6 +2216,13 @@ modeBtn.addEventListener('click', () => {
   }
 });
 
+modelSelect.addEventListener('change', () => {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'switch_model', model: modelSelect.value }));
+    setStatus('processing', 'Switching model...');
+  }
+});
+
 audioToggleBtn.addEventListener('click', () => {
   audioOffMode = !audioOffMode;
   localStorage.setItem('voiceBridgeAudioMode', audioOffMode ? 'off' : 'on');
@@ -1810,7 +2240,6 @@ audioToggleBtn.addEventListener('click', () => {
 
 // Toggle text input visibility
 const textInputRow = document.getElementById('textInputRow');
-const textDivider = document.getElementById('textDivider');
 const voiceView = document.getElementById('voiceView');
 
 let textMode = true;
@@ -1818,7 +2247,6 @@ let textMode = true;
 function applyInputMode() {
   voiceView.style.display = textMode ? 'none' : '';
   textInputRow.style.display = textMode ? 'flex' : 'none';
-  textDivider.style.display = textMode ? 'block' : 'none';
   queuedBar.style.display = textMode ? '' : 'none';
   keyboardBtn.textContent = textMode ? '🎙' : '⌨';
   keyboardBtn.title = textMode ? 'Switch to voice' : 'Switch to text input';
@@ -1944,6 +2372,9 @@ function onPlaybackComplete() {
   stopBtn.classList.remove('visible');
   setSendButtonBusy(false);
   updatePushVoiceButtonState();
+
+  // Notify if tab is hidden and no queued message waiting
+  if (!queuedMessage) notifyIfHidden('Claude has finished responding');
 
   // Drain any queued message first — if drained, skip normal post-response UI
   if (drainQueueIfIdle()) return;
@@ -2531,7 +2962,7 @@ async function copyMessage(btn) {
 
 function setStatus(state, text) {
   statusDot.className = 'status-dot ' + state;
-  statusText.textContent = text;
+  statusDot.title = text;
 }
 
 // ---------------------------------------------------------------------------
@@ -2544,19 +2975,38 @@ function sendTextMessage() {
 }
 
 function sendMessageText(text) {
-  if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!text && !pendingImages.length) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
   if (sendBtn.dataset.busy === 'true') {
-    queueMessage(text);
+    if (text) queueMessage(text);
     return;
   }
   if (sendBtn.disabled) return;
   lastUserMessage = text;
 
   // Show in chat immediately
-  addMessage('user', text);
+  const msgEl = addMessage('user', text);
 
-  // Send to server
-  ws.send(JSON.stringify({ type: 'text_message', text }));
+  if (pendingImages.length > 0) {
+    // Append image thumbnails into the user message bubble
+    for (const img of pendingImages) {
+      const imgEl = document.createElement('img');
+      imgEl.className = 'message-image';
+      imgEl.src = `data:${img.media_type};base64,${img.data}`;
+      imgEl.alt = img.name;
+      msgEl.appendChild(imgEl);
+    }
+    // Send image message to server
+    ws.send(JSON.stringify({
+      type: 'image_message',
+      text: text || '',
+      images: pendingImages.map(i => ({ data: i.data, media_type: i.media_type })),
+    }));
+    clearPendingImages();
+  } else {
+    // Send normal text message to server
+    ws.send(JSON.stringify({ type: 'text_message', text }));
+  }
 
   // Clear input and mark busy until response completes
   textInput.value = '';
@@ -2599,6 +3049,14 @@ textInput.addEventListener('keydown', (evt) => {
   }
 });
 
+// Escape key stops TTS when a response is in progress
+document.addEventListener('keydown', (evt) => {
+  if (evt.key === 'Escape' && sendBtn.dataset.busy === 'true') {
+    evt.preventDefault();
+    stopTTS();
+  }
+});
+
 // Auto-resize textarea as user types
 textInput.addEventListener('input', () => {
   textInput.style.height = 'auto';
@@ -2607,6 +3065,170 @@ textInput.addEventListener('input', () => {
 });
 
 applyInputMode();
+
+// ---------------------------------------------------------------------------
+// Image input — helpers, drag-drop, paste
+// ---------------------------------------------------------------------------
+
+/**
+ * Read an image File and resolve to {data, media_type, name}.
+ * Rejects if type or size is invalid.
+ */
+function processImageFile(file) {
+  return new Promise((resolve, reject) => {
+    if (!ALLOWED_IMAGE_TYPES.includes(file.type)) {
+      reject(new Error(`Unsupported image type: ${file.type}`));
+      return;
+    }
+    if (file.size > MAX_IMAGE_SIZE) {
+      reject(new Error(`Image too large (max 5 MB): ${file.name}`));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      const dataUrl = evt.target.result;
+      // dataUrl format: "data:<media_type>;base64,<data>"
+      const commaIdx = dataUrl.indexOf(',');
+      const base64 = dataUrl.slice(commaIdx + 1);
+      resolve({ data: base64, media_type: file.type, name: file.name });
+    };
+    reader.onerror = () => reject(new Error('Failed to read file'));
+    reader.readAsDataURL(file);
+  });
+}
+
+/** Re-render the pending image thumbnails above the text input. */
+function renderImagePreviews() {
+  imagePreviewRow.innerHTML = '';
+  if (pendingImages.length === 0) {
+    imagePreviewRow.style.display = 'none';
+    document.getElementById('attachBtn')?.classList.remove('has-images');
+    updateSendButtonState();
+    return;
+  }
+  imagePreviewRow.style.display = 'flex';
+  document.getElementById('attachBtn')?.classList.add('has-images');
+  pendingImages.forEach((img, idx) => {
+    const item = document.createElement('div');
+    item.className = 'image-preview-item';
+
+    const imgEl = document.createElement('img');
+    imgEl.src = `data:${img.media_type};base64,${img.data}`;
+    imgEl.alt = img.name;
+    item.appendChild(imgEl);
+
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'image-preview-remove';
+    removeBtn.type = 'button';
+    removeBtn.title = 'Remove image';
+    removeBtn.textContent = '✕';
+    removeBtn.addEventListener('click', () => removeImage(idx));
+    item.appendChild(removeBtn);
+
+    imagePreviewRow.appendChild(item);
+  });
+  updateSendButtonState();
+}
+
+function removeImage(idx) {
+  pendingImages.splice(idx, 1);
+  renderImagePreviews();
+}
+
+function clearPendingImages() {
+  pendingImages = [];
+  renderImagePreviews();
+}
+
+// Drag-drop: use a counter to handle nested elements
+let dragCounter = 0;
+
+document.addEventListener('dragenter', (evt) => {
+  const hasImageFiles = Array.from(evt.dataTransfer.items || []).some(
+    item => item.kind === 'file' && ALLOWED_IMAGE_TYPES.includes(item.type)
+  );
+  if (!hasImageFiles) return;
+  dragCounter++;
+  dropOverlay.classList.add('active');
+  evt.preventDefault();
+});
+
+document.addEventListener('dragleave', (evt) => {
+  dragCounter--;
+  if (dragCounter <= 0) {
+    dragCounter = 0;
+    dropOverlay.classList.remove('active');
+  }
+});
+
+document.addEventListener('dragover', (evt) => {
+  evt.preventDefault();
+});
+
+document.addEventListener('drop', async (evt) => {
+  evt.preventDefault();
+  dragCounter = 0;
+  dropOverlay.classList.remove('active');
+
+  const files = Array.from(evt.dataTransfer.files || []).filter(
+    f => ALLOWED_IMAGE_TYPES.includes(f.type)
+  );
+
+  for (const file of files) {
+    try {
+      const img = await processImageFile(file);
+      pendingImages.push(img);
+    } catch (err) {
+      console.warn('[bridge] Image drop error:', err.message);
+    }
+  }
+  if (files.length > 0) renderImagePreviews();
+});
+
+// Paste: only intercept image items, let text paste through normally
+document.addEventListener('paste', async (evt) => {
+  const items = Array.from(evt.clipboardData?.items || []).filter(
+    item => item.kind === 'file' && ALLOWED_IMAGE_TYPES.includes(item.type)
+  );
+  if (items.length === 0) return;
+  evt.preventDefault();
+
+  for (const item of items) {
+    const file = item.getAsFile();
+    if (!file) continue;
+    try {
+      const img = await processImageFile(file);
+      pendingImages.push(img);
+    } catch (err) {
+      console.warn('[bridge] Image paste error:', err.message);
+    }
+  }
+  renderImagePreviews();
+});
+
+// File picker button — works on desktop and mobile (opens camera roll / Files)
+const attachBtn = document.getElementById('attachBtn');
+const imageFileInput = document.getElementById('imageFileInput');
+
+attachBtn.addEventListener('click', () => {
+  imageFileInput.value = '';   // reset so same file can be re-selected
+  imageFileInput.click();
+});
+
+imageFileInput.addEventListener('change', async () => {
+  const files = Array.from(imageFileInput.files || []).filter(
+    f => ALLOWED_IMAGE_TYPES.includes(f.type)
+  );
+  for (const file of files) {
+    try {
+      const img = await processImageFile(file);
+      pendingImages.push(img);
+    } catch (err) {
+      console.warn('[bridge] Image pick error:', err.message);
+    }
+  }
+  if (files.length > 0) renderImagePreviews();
+});
 
 // ---------------------------------------------------------------------------
 // Session drawer — state and helpers
@@ -2745,6 +3367,8 @@ async function switchSession(sessionId) {
   queuedMessage = null;
   queueTurnId++;
   renderQueueBar();
+  // Clear any pending images
+  clearPendingImages();
 
   // Update tracked ID and persist
   currentSessionId = sessionId;
@@ -2829,9 +3453,14 @@ async function deleteSession(sessionId) {
 function restoreMessages(messages) {
   if (!messages || messages.length === 0) return;
 
+  let didCompact = false;
   for (const msg of messages) {
     if (msg.role === 'user') {
       if (msg.text && msg.text.trim()) {
+        if (msg.text.startsWith('This session is being continued from a previous conversation')) {
+          didCompact = true;
+          continue;
+        }
         addMessage('user', msg.text);
       }
     } else if (msg.role === 'assistant') {
@@ -2856,6 +3485,13 @@ function restoreMessages(messages) {
     }
   }
 
+  if (didCompact) {
+    const notice = document.createElement('div');
+    notice.className = 'system-notice';
+    notice.textContent = 'Context was compacted — earlier messages were summarized.';
+    chatMessages.appendChild(notice);
+  }
+
   scrollToBottom();
 }
 
@@ -2863,6 +3499,7 @@ function restoreMessages(messages) {
 // Init
 // ---------------------------------------------------------------------------
 
+ensureWsOwnership({ force: true });
 connect();
 </script>
 </body>

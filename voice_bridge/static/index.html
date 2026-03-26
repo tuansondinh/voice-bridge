@@ -131,6 +131,149 @@ body {
   font-size: 13px;
 }
 
+.content {
+  display: flex;
+  flex-direction: column;
+}
+
+.assistant-text {
+  white-space: pre-wrap;
+}
+
+.tool-card {
+  background: var(--surface);
+  border-left: 3px solid var(--border);
+  padding: 8px 12px;
+  margin: 12px 0;
+  border-radius: 12px;
+}
+
+.tool-card.loading {
+  border-left-color: #f59e0b;
+  animation: tool-card-pulse 1s infinite;
+}
+
+.tool-card.success {
+  border-left-color: var(--success);
+}
+
+.tool-card.error {
+  border-left-color: var(--accent);
+}
+
+.tool-card-header {
+  display: flex;
+  cursor: pointer;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+}
+
+.tool-card-body {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.3s;
+}
+
+.tool-card.expanded .tool-card-body {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.tool-card-body pre {
+  font-size: 13px;
+  margin: 4px 0;
+  word-break: break-all;
+}
+
+.tool-icon {
+  width: 16px;
+  height: 16px;
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+
+.tool-status {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.tool-chevron {
+  margin-left: auto;
+  transition: transform 0.2s;
+}
+
+.tool-card.expanded .tool-chevron,
+.thinking-block.expanded .tool-chevron {
+  transform: rotate(90deg);
+}
+
+.thinking-block {
+  background: var(--surface);
+  border-left: 3px dashed var(--text-dim);
+  padding: 8px 12px;
+  margin: 12px 0;
+  border-radius: 12px;
+  opacity: 0.8;
+}
+
+.thinking-block-header {
+  display: flex;
+  cursor: pointer;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+}
+
+.thinking-block-body {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.3s;
+}
+
+.thinking-block.expanded .thinking-block-body {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.typing-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.typing-indicator .dots {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.typing-indicator .dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  display: inline-block;
+  animation: typing-bounce 0.6s infinite;
+}
+
+.typing-indicator .dots span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.typing-indicator .dots span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes tool-card-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.65; }
+}
+
+@keyframes typing-bounce {
+  0%, 100% { transform: translateY(0); opacity: 0.5; }
+  50% { transform: translateY(-3px); opacity: 1; }
+}
+
 /* Controls */
 .controls {
   padding: 16px;
@@ -533,6 +676,7 @@ function handleMessage(msg) {
       addMessage('user', msg.text);
       setStatus('processing', 'Processing...');
       hint.textContent = 'Claude is thinking...';
+      showTypingIndicator();
       // In push mode, stop recording and flush server-side buffers.
       // In auto mode, keep mic active for barge-in (server gates VAD during TTS).
       if (!alwaysOnMode && isRecording) {
@@ -544,7 +688,22 @@ function handleMessage(msg) {
       break;
 
     case 'assistant_chunk':
+      removeTypingIndicator();
       appendAssistantChunk(msg.text);
+      break;
+
+    case 'tool_use_start':
+      removeTypingIndicator();
+      appendToolCard(msg);
+      break;
+
+    case 'tool_result':
+      updateToolCard(msg);
+      break;
+
+    case 'thinking':
+      removeTypingIndicator();
+      appendThinkingBlock(msg);
       break;
 
     case 'assistant_done':
@@ -889,6 +1048,43 @@ function onPlaybackComplete() {
 // ---------------------------------------------------------------------------
 
 let currentAssistantEl = null;
+let currentTextSpan = null;
+
+function createAssistantMessage() {
+  const el = document.createElement('div');
+  el.className = 'message assistant';
+
+  const label = document.createElement('div');
+  label.className = 'label';
+  label.textContent = 'Claude';
+  el.appendChild(label);
+
+  const content = document.createElement('div');
+  content.className = 'content';
+  el.appendChild(content);
+
+  chat.appendChild(el);
+  chat.scrollTop = chat.scrollHeight;
+  return el;
+}
+
+function ensureAssistantMessage() {
+  if (!currentAssistantEl) {
+    currentAssistantEl = createAssistantMessage();
+  }
+  return currentAssistantEl;
+}
+
+function ensureCurrentTextSpan() {
+  const assistantEl = ensureAssistantMessage();
+  if (!currentTextSpan) {
+    currentTextSpan = document.createElement('div');
+    currentTextSpan.className = 'assistant-text';
+    currentTextSpan.dataset.rawText = '';
+    assistantEl.querySelector('.content').appendChild(currentTextSpan);
+  }
+  return currentTextSpan;
+}
 
 function addMessage(role, text) {
   const el = document.createElement('div');
@@ -909,36 +1105,20 @@ function addMessage(role, text) {
 }
 
 function appendAssistantChunk(text) {
-  if (!currentAssistantEl) {
-    currentAssistantEl = document.createElement('div');
-    currentAssistantEl.className = 'message assistant';
-
-    const label = document.createElement('div');
-    label.className = 'label';
-    label.textContent = 'Claude';
-    currentAssistantEl.appendChild(label);
-
-    const content = document.createElement('div');
-    content.className = 'content';
-    currentAssistantEl.appendChild(content);
-
-    chat.appendChild(currentAssistantEl);
-  }
-
-  const content = currentAssistantEl.querySelector('.content');
-  content.textContent += text;
+  const textSpan = ensureCurrentTextSpan();
+  textSpan.dataset.rawText = (textSpan.dataset.rawText || '') + text;
+  textSpan.textContent += text;
   chat.scrollTop = chat.scrollHeight;
 }
 
 function finalizeAssistantMessage() {
   if (currentAssistantEl) {
-    // Simple markdown: convert code blocks
-    const content = currentAssistantEl.querySelector('.content');
-    if (content) {
-      content.innerHTML = simpleMarkdown(content.textContent);
-    }
+    currentAssistantEl.querySelectorAll('.assistant-text').forEach((textSpan) => {
+      textSpan.innerHTML = simpleMarkdown(textSpan.dataset.rawText || textSpan.textContent);
+    });
   }
   currentAssistantEl = null;
+  currentTextSpan = null;
 }
 
 function addSystemMessage(text) {
@@ -968,6 +1148,135 @@ function simpleMarkdown(text) {
   html = html.replace(/\n/g, '<br>');
 
   return html;
+}
+
+function truncateText(value, limit) {
+  if (value.length <= limit) return value;
+  return value.slice(0, limit) + '\n...';
+}
+
+function humanizeToolName(name) {
+  const toolNames = {
+    Read: 'Read File',
+    Edit: 'Edit File',
+    Write: 'Write File',
+    Bash: 'Run Command',
+    Grep: 'Search Code',
+    Glob: 'Find Files',
+    WebSearch: 'Web Search',
+    WebFetch: 'Fetch URL',
+  };
+  return toolNames[name] || name;
+}
+
+function toggleToolCard(el) {
+  el.classList.toggle('expanded');
+}
+
+function appendToolCard({ id, name, input }) {
+  const assistantEl = ensureAssistantMessage();
+  currentTextSpan = null;
+
+  const card = document.createElement('div');
+  card.className = 'tool-card loading';
+  card.dataset.toolId = id;
+  card.dataset.toolName = humanizeToolName(name);
+
+  card.innerHTML = `
+    <div class="tool-card-header" onclick="toggleToolCard(this.parentElement)">
+      <svg class="tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M14.7 6.3a4 4 0 0 0 5 5L22 13.6l-6.4 6.4-4-4L18 9.6l-2.3-2.3Z"></path>
+        <path d="m9.6 18-4.2 4.2a1.4 1.4 0 0 1-2-2L7.6 16"></path>
+        <path d="m4.5 11.5 8 8"></path>
+      </svg>
+      <span>${card.dataset.toolName}</span>
+      <span class="tool-status">Running...</span>
+      <span class="tool-chevron">›</span>
+    </div>
+    <div class="tool-card-body">
+      <pre class="tool-input"></pre>
+      <pre class="tool-output"></pre>
+    </div>
+  `;
+
+  const inputText = truncateText(JSON.stringify(input ?? {}, null, 2), 500);
+  card.querySelector('.tool-input').textContent = inputText;
+
+  assistantEl.querySelector('.content').appendChild(card);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function updateToolCard({ id, tool_use_id, content, is_error }) {
+  const toolId = id || tool_use_id;
+  if (!toolId) return;
+
+  const card = document.querySelector(`[data-tool-id="${CSS.escape(toolId)}"]`);
+  if (!card) return;
+
+  card.classList.remove('loading');
+  card.classList.add(is_error ? 'error' : 'success');
+  card.querySelector('.tool-status').textContent = is_error ? 'Error' : card.dataset.toolName;
+
+  const outputText = typeof content === 'string'
+    ? content
+    : JSON.stringify(content ?? '', null, 2);
+  card.querySelector('.tool-output').textContent = truncateText(outputText, 1000);
+}
+
+function appendThinkingBlock({ text }) {
+  const assistantEl = ensureAssistantMessage();
+  currentTextSpan = null;
+
+  const block = document.createElement('div');
+  block.className = 'thinking-block';
+  block.innerHTML = `
+    <div class="thinking-block-header" onclick="toggleToolCard(this.parentElement)">
+      <span class="tool-icon" aria-hidden="true">🧠</span>
+      <span>Thinking</span>
+      <span class="tool-chevron">›</span>
+    </div>
+    <div class="thinking-block-body">
+      <pre></pre>
+    </div>
+  `;
+  block.querySelector('pre').textContent = text || '';
+
+  assistantEl.querySelector('.content').appendChild(block);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function showTypingIndicator() {
+  removeTypingIndicator();
+
+  const el = document.createElement('div');
+  el.className = 'message assistant';
+  el.id = 'typingIndicator';
+
+  const label = document.createElement('div');
+  label.className = 'label';
+  label.textContent = 'Claude';
+  el.appendChild(label);
+
+  const content = document.createElement('div');
+  content.className = 'typing-indicator';
+  content.innerHTML = `
+    <span class="dots" aria-hidden="true">
+      <span></span>
+      <span></span>
+      <span></span>
+    </span>
+  `;
+  el.appendChild(content);
+
+  chat.appendChild(el);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function removeTypingIndicator() {
+  const indicator = document.getElementById('typingIndicator');
+  if (indicator) {
+    indicator.remove();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1002,6 +1311,7 @@ function sendTextMessage() {
 
   setStatus('processing', 'Processing...');
   hint.textContent = 'Claude is thinking...';
+  showTypingIndicator();
 }
 
 sendBtn.addEventListener('click', sendTextMessage);

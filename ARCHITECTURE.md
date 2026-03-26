@@ -12,7 +12,7 @@
 │ • Voice UI          │  Binary: PCM audio   │ • STT (Whisper)     │
 │ • Chat interface    │  JSON: control msgs  │ • TTS (Kokoro)      │
 │                     │                      │ • VAD (Silero)      │
-│                     │                      │ • Claude CLI bridge  │
+│                     │                      │ • Claude Agent SDK   │
 └─────────────────────┘                      └──────────────────────┘
 ```
 
@@ -47,8 +47,9 @@ voice_bridge/
 ### 1. `__main__.py` — Entry Point
 
 Responsibilities:
-- Parse command-line arguments (`--host`, `--port`)
-- Check Claude CLI availability (fail fast if missing)
+- Parse command-line arguments (`--host`, `--port`, `--model`)
+- Check `claude_agent_sdk` importability (fail fast if missing)
+- Verify auth env vars are present (`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`)
 - Eagerly load ML models (VAD, Whisper, TTS) at startup
 - Print access URLs (local IP + token)
 - Start uvicorn server
@@ -98,7 +99,7 @@ Manages a single phone-to-PC voice session. Key aspects:
 
 #### Key Routes:
 - `GET /` — Serve mobile UI (`index.html`)
-- `GET /health` — Health check (model loading status)
+- `GET /health` — Health check (model loading status, SDK availability, auth method)
 - `WebSocket /ws` — Voice communication endpoint
   - Auth: token query parameter validation
   - Origin: CORS-like validation (localhost, LAN IP, tunnel origins)
@@ -108,26 +109,32 @@ Manages a single phone-to-PC voice session. Key aspects:
 - `_models`: Dict holding loaded VAD, Whisper, and TTS instances
 - `_active_session`: Current BridgeSession (single session at a time)
 - `AUTH_TOKEN`: 64-character hex token generated at startup
+- `_BRIDGE_MODEL`: Claude model name (set by `set_bridge_model()` at startup)
 
-### 3. `claude.py` — Claude CLI Bridge
+### 3. `claude.py` — Claude Agent SDK Client
 
-Wraps the Claude CLI (`claude` command) as a subprocess. Key design:
+Wraps the `claude-agent-sdk` Python package for multi-turn conversations.
+The SDK bundles the Claude Code CLI internally — no subprocess management
+or JSON stdout parsing is needed.
+
+**Authentication:**
+- `CLAUDE_CODE_OAUTH_TOKEN` — Claude Max subscription (OAuth, long-lived token)
+  - Generate with: `claude setup-token`
+- `ANTHROPIC_API_KEY` — Anthropic API key (pay-per-use billing)
+- At least one must be set; startup checks this before loading models.
 
 **ClaudeSession class:**
-- Spawns `claude --output-format stream-json` process per message
-- Parses streaming JSON output and yields text chunks
-- Maintains multi-turn conversation via `--resume <session_id>`
-- Async subprocess handling: `asyncio.create_subprocess_exec`
-
-**How it works:**
-1. First call: Capture `session_id` from init event
-2. Subsequent calls: Pass `--resume <session_id>` to maintain context
-3. Each call spawns fresh process (no persistent session state)
+- Configures `ClaudeAgentOptions` with `allowed_tools=[]` (chat-only, no
+  file/bash access), `permission_mode="acceptEdits"`, `max_turns=100`
+- Accepts `model` parameter (default: `"sonnet"`) passed from `--model` flag
+- Uses `async with ClaudeSDKClient(options)` as persistent session
+- Calls `client.query(text)` then streams `client.receive_response()`
+- Extracts text from `AssistantMessage` / `TextBlock` objects
 
 **Key methods:**
 - `send_message(text)` → AsyncGenerator[str] — Send text, yield response chunks
-- `check_available()` — Static method to verify `claude` CLI exists on PATH
-- `cancel()` — Kill active Claude subprocess
+- `check_available()` — Static method: checks `claude_agent_sdk` is importable
+- `cancel()` — Sets cancellation flag and calls `client.interrupt()`
 
 ### 4. `audio.py` — Low-Level Audio & VAD Model
 
@@ -191,7 +198,7 @@ Wraps pywhispercpp for STT. Key design:
 4. Whisper transcribes utterance → TranscribeResult (text + no_speech_prob)
 5. Text accumulated in _pending_segments, waits for continuation timeout
 6. After timeout or "over" → segments joined → send to Claude
-7. Claude CLI spawned, text sent, response streamed back
+7. ClaudeSDKClient.query() called, response streamed via receive_response()
 8. Response text accumulates in sentence_buffer
 9. Complete sentences → TTS queue
 10. TTS consumer synthesizes 24 kHz audio → sends via WebSocket binary
@@ -256,7 +263,7 @@ Result
 ### Claude → TTS (Kokoro) → Phone
 
 ```
-Claude CLI response stream
+Claude Agent SDK response stream (AssistantMessage TextBlocks)
   ↓
 sentence_buffer accumulates chunks
   ↓
@@ -323,10 +330,13 @@ Total: ~400 MB on first download, ~10–15 seconds to load.
 ### Environment Variables
 - `BRIDGE_ALLOWED_ORIGIN` — Extra allowed WebSocket origin (set to `*` for tunnels)
 - `PYTORCH_ENABLE_MPS_FALLBACK` — Fallback to CPU if MPS unavailable
+- `CLAUDE_CODE_OAUTH_TOKEN` — Claude Max OAuth token (run `claude setup-token` to generate)
+- `ANTHROPIC_API_KEY` — Anthropic API key for pay-per-use billing
 
 ### Command-Line Arguments
 - `--host` — Bind address (default: `0.0.0.0`)
 - `--port` — Port (default: `8787`)
+- `--model` — Claude model alias (default: `sonnet`; options: `sonnet`, `opus`, `haiku`)
 
 ### Security
 - **Auth token** — 64-character hex, validated on every WebSocket connection
@@ -346,7 +356,8 @@ Total: ~400 MB on first download, ~10–15 seconds to load.
 - JSON decode errors ignored
 
 **Critical failures:**
-- Claude CLI not found on PATH → exit at startup
+- `claude-agent-sdk` not importable → exit at startup with install instructions
+- No auth env vars (`CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`) → exit at startup
 - Model loading failures → exit at startup
 
 ## Performance Considerations

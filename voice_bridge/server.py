@@ -75,6 +75,17 @@ _CONTINUATION_TIMEOUT = 1.0
 _models: dict[str, Any] = {}
 _active_session: BridgeSession | None = None
 
+# Model name to use for new ClaudeSession instances — set at startup via
+# set_bridge_model() when the --model CLI flag is parsed.
+_BRIDGE_MODEL: str = "sonnet"
+
+
+def set_bridge_model(model: str) -> None:
+    """Set the Claude model for new sessions (call before load_models)."""
+    global _BRIDGE_MODEL
+    _BRIDGE_MODEL = model
+    _log(f"Claude model set to: {model}")
+
 
 class BridgeSession:
     """Manages one phone-to-PC voice session over WebSocket.
@@ -105,7 +116,7 @@ class BridgeSession:
         self._continuation_deadline: float | None = None
         self._tts = _models["tts"]
         self._whisper_model = _models["whisper"]
-        self._claude = ClaudeSession()
+        self._claude = ClaudeSession(model=_BRIDGE_MODEL)
         self._tts_task: asyncio.Task | None = None
         self._stop_tts = asyncio.Event()
         self._response_lock = asyncio.Lock()  # serializes voice + text → Claude
@@ -510,9 +521,23 @@ async def serve_ui(token: str = Query("")):
 @app.get("/health")
 async def health():
     """Health check endpoint."""
+    import os as _os
+
+    from voice_bridge.claude import ClaudeSession
+
+    # Determine which auth method is configured (if any)
+    auth_method: str | None = None
+    if _os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        auth_method = "CLAUDE_CODE_OAUTH_TOKEN"
+    elif _os.environ.get("ANTHROPIC_API_KEY"):
+        auth_method = "ANTHROPIC_API_KEY"
+
     return {
         "status": "ready" if _models.get("whisper") else "loading",
         "models_loaded": list(_models.keys()),
+        "sdk_available": ClaudeSession.check_available(),
+        "auth_method": auth_method,
+        "model": _BRIDGE_MODEL,
     }
 
 

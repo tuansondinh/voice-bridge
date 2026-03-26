@@ -62,9 +62,16 @@ class ClaudeSession:
     The SDK is configured with an empty ``allowed_tools`` list so Claude is
     restricted to chat-only mode — no file access or shell execution is
     available through the voice bridge.
+
+    Parameters
+    ----------
+    model:
+        Model alias to pass to ``ClaudeAgentOptions``.  Defaults to
+        ``"sonnet"`` (maps to the latest Claude Sonnet release).
+        Other valid values: ``"opus"``, ``"haiku"``.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, model: str = "sonnet") -> None:
         auth_method = _check_auth()
         _log(f"Auth via {auth_method}")
 
@@ -72,6 +79,7 @@ class ClaudeSession:
             allowed_tools=[],           # chat-only — no file/bash access
             permission_mode="acceptEdits",
             max_turns=100,
+            model=model,
         )
 
         # Active SDK client (set inside send_message context)

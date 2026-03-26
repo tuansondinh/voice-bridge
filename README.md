@@ -22,18 +22,41 @@ pip install -e .
 uv sync
 ```
 
-Requires Claude Code CLI on PATH (`claude`).
+The `claude-agent-sdk` package is installed automatically as a dependency.
+It bundles the Claude Code CLI internally — no separate `claude` binary on PATH is needed.
+
+### Authentication
+
+Set **one** of these environment variables before starting voice-bridge:
+
+**Option A — Claude Max subscription (OAuth, recommended):**
+
+```bash
+claude setup-token          # generates a long-lived OAuth token
+export CLAUDE_CODE_OAUTH_TOKEN=<token from above>
+```
+
+**Option B — Anthropic API key (pay-per-use billing):**
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+voice-bridge exits immediately with a clear error message if neither variable is set.
 
 ## Start / restart
 
 ```bash
-pkill -f "agent-voice-bridge" 2>/dev/null; pkill -f "uvicorn.*bridge" 2>/dev/null; sleep 1 && \
-  cd /path/to/voice-bridge && \
+pkill -f "agent-voice-bridge" 2>/dev/null; pkill -f "uvicorn.*bridge" 2>/dev/null; pkill -f "cloudflared" 2>/dev/null; sleep 1 && \
   BRIDGE_ALLOWED_ORIGIN="*" nohup uv run voice-bridge --port 8787 > /tmp/bridge.log 2>&1 & \
-  sleep 8 && grep "token=" /tmp/bridge.log | head -1
+  nohup cloudflared tunnel --url http://localhost:8787 > /tmp/cloudflared.log 2>&1 & \
+  sleep 12 && \
+  CF_URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' /tmp/cloudflared.log | head -1) && \
+  TOKEN=$(grep -o 'token=[a-f0-9]*' /tmp/bridge.log | head -1) && \
+  echo "$CF_URL/?$TOKEN"
 ```
 
-This kills any running bridge processes, starts fresh, and prints the token URL after 8 seconds. Logs are at `/tmp/bridge.log`.
+This kills any running bridge and cloudflared processes, starts both fresh, and prints the full Cloudflare HTTPS URL with token after 12 seconds. Logs are at `/tmp/bridge.log` and `/tmp/cloudflared.log`.
 
 ---
 
@@ -119,15 +142,19 @@ Microphone works because the origin is HTTPS. Traffic stays within your Tailscal
 |------|---------|-------------|
 | `--host` | `0.0.0.0` | Bind address |
 | `--port` | `8787` | Port |
+| `--model` | `sonnet` | Claude model (`sonnet`, `opus`, `haiku`) |
 
 | Env var | Description |
 |---------|-------------|
 | `BRIDGE_ALLOWED_ORIGIN` | Extra allowed WebSocket origin. Set to `*` for any tunnel. |
+| `CLAUDE_CODE_OAUTH_TOKEN` | Claude Max OAuth token (run `claude setup-token`). |
+| `ANTHROPIC_API_KEY` | Anthropic API key for pay-per-use billing. |
 
 ---
 
 ## Requirements
 
 - Python 3.12+
-- Claude Code CLI on PATH (`claude`)
+- `claude-agent-sdk` (installed automatically via `pip install -e .`)
+- `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` environment variable
 - macOS (Kokoro TTS uses MPS/CPU; Linux should work with CPU fallback)

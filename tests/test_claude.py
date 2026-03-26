@@ -158,6 +158,16 @@ class TestConstructorAuth:
             session = ClaudeSession()
             assert session is not None
 
+    def test_enables_tools_explicitly(self):
+        """ClaudeSession() opts into SDK tools instead of inheriting the empty default."""
+        env = {"ANTHROPIC_API_KEY": "sk-test-key"}
+        with patch.dict(os.environ, env, clear=True):
+            from voice_bridge.claude import ClaudeSession
+
+            session = ClaudeSession()
+
+        assert session._options.tools == "all"
+
 
 # ---------------------------------------------------------------------------
 # Test: send_message — yields text chunks via SDK

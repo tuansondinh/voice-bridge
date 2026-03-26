@@ -96,6 +96,9 @@ class ClaudeSession:
         _log(f"Auth via {auth_method}")
 
         self._options = ClaudeAgentOptions(
+            # `allowed_tools` defaults to [] in the SDK, which silently disables
+            # tools unless we opt in explicitly.
+            tools="all",
             permission_mode="bypassPermissions",
             max_turns=100,
             model=model,

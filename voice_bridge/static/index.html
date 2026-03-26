@@ -444,7 +444,7 @@ let isTTSPlaying = false;
 // Always-on mode: mic resumes automatically after TTS playback.
 // Push-to-talk mode: user taps mic manually.
 // Persisted in localStorage so it survives page reloads (new token URLs).
-let alwaysOnMode = localStorage.getItem('voiceBridgeMode') !== 'push';
+let alwaysOnMode = localStorage.getItem('voiceBridgeMode') === 'auto';
 
 // Audio playback queue (24kHz Int16LE chunks)
 let playbackQueue = [];

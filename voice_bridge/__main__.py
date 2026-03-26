@@ -70,7 +70,7 @@ def run_bridge() -> None:
         sys.exit(1)
 
     # Load models eagerly
-    from voice_bridge.server import AUTH_TOKEN, app, load_models, set_bridge_model
+    from voice_bridge.server import AUTH_TOKEN, TAILSCALE_HOSTNAME, app, load_models, set_bridge_model
 
     set_bridge_model(args.model)
     load_models()
@@ -83,10 +83,15 @@ def run_bridge() -> None:
     _log("")
     _log(f"  Local:   http://localhost:{args.port}/?token={AUTH_TOKEN}")
     _log(f"  Network: http://{local_ip}:{args.port}/?token={AUTH_TOKEN}")
+    if TAILSCALE_HOSTNAME:
+        _log(f"  Tailscale: https://{TAILSCALE_HOSTNAME}:{args.port}/?token={AUTH_TOKEN}")
     _log("")
     _log("  Open the Network URL on your phone to start.")
     _log("  (Both devices must be on the same WiFi network,")
-    _log("   or use Tailscale/ngrok for remote access)")
+    if TAILSCALE_HOSTNAME:
+        _log("   or use the Tailscale URL above for remote access)")
+    else:
+        _log("   or use Tailscale for remote access — install Tailscale and enable HTTPS)")
     _log("")
     if args.host == "0.0.0.0":
         _log("  WARNING: Server is bound to 0.0.0.0 and is reachable from")

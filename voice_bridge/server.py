@@ -111,6 +111,42 @@ def _get_local_ip() -> str:
         return "127.0.0.1"
 
 
+def _get_tailscale_hostname() -> str | None:
+    """Detect the machine's Tailscale HTTPS hostname (e.g. my-pc.tail1234.ts.net).
+
+    Tries the macOS app binary first, then falls back to ``tailscale`` in PATH
+    (Linux / Homebrew CLI). Returns ``None`` if Tailscale is not installed,
+    not connected, or HTTPS certificates are not enabled.
+    """
+    import json
+    import subprocess
+
+    candidates = [
+        ["/Applications/Tailscale.app/Contents/MacOS/Tailscale", "status", "--json"],
+        ["tailscale", "status", "--json"],
+    ]
+    for cmd in candidates:
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                timeout=3,
+            )
+            if result.returncode != 0:
+                continue
+            data = json.loads(result.stdout)
+            dns_name: str = data.get("Self", {}).get("DNSName", "")
+            if dns_name:
+                return dns_name.rstrip(".")
+        except Exception:
+            continue
+    return None
+
+
+# Resolved once at import time so startup is fast and all handlers share the value.
+TAILSCALE_HOSTNAME: str | None = _get_tailscale_hostname()
+
+
 # ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
@@ -685,6 +721,8 @@ async def websocket_endpoint(ws: WebSocket, token: str = Query("")):
             local_ip = _get_local_ip()
             if local_ip != "127.0.0.1":
                 allowed_prefixes.append(f"http://{local_ip}")
+            if TAILSCALE_HOSTNAME:
+                allowed_prefixes.append(f"https://{TAILSCALE_HOSTNAME}")
             if extra_origin:
                 allowed_prefixes.append(extra_origin)
 

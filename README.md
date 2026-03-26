@@ -91,20 +91,52 @@ voice-bridge exits immediately with a clear error message if neither variable is
 ## Start / restart
 
 ```bash
-pkill -f "agent-voice-bridge" 2>/dev/null; pkill -f "uvicorn.*bridge" 2>/dev/null; pkill -f "cloudflared" 2>/dev/null; sleep 1 && \
-  BRIDGE_ALLOWED_ORIGIN="*" nohup uv run voice-bridge --port 8787 > /tmp/bridge.log 2>&1 & \
-  nohup cloudflared tunnel --url http://localhost:8787 > /tmp/cloudflared.log 2>&1 & \
-  sleep 12 && \
-  CF_URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' /tmp/cloudflared.log | head -1) && \
-  TOKEN=$(grep -o 'token=[a-f0-9]*' /tmp/bridge.log | head -1) && \
-  echo "$CF_URL/?$TOKEN"
+pkill -f "agent-voice-bridge" 2>/dev/null; pkill -f "uvicorn.*bridge" 2>/dev/null; sleep 1 && \
+  nohup uv run voice-bridge --port 8787 > /tmp/bridge.log 2>&1 &
 ```
 
-This kills any running bridge and cloudflared processes, starts both fresh, and prints the full Cloudflare HTTPS URL with token after 12 seconds. Logs are at `/tmp/bridge.log` and `/tmp/cloudflared.log`.
+This kills any running bridge process and starts it fresh. Logs are at `/tmp/bridge.log`.
 
 ---
 
-## Using with Cloudflare Tunnel (recommended)
+## Using with Tailscale HTTPS (recommended)
+
+Tailscale gives every device a stable `*.ts.net` HTTPS URL — no public exposure, no tunnel relay, and no extra env vars needed.
+
+### One-time setup
+
+1. Install Tailscale: `brew install --cask tailscale`, sign in, connect.
+2. In the [Tailscale admin console](https://login.tailscale.com/admin/dns), enable **HTTPS Certificates** under the DNS tab.
+3. Enable the HTTPS proxy (run once, survives reboots):
+   ```bash
+   tailscale serve --bg http://localhost:8787
+   ```
+
+### Each session
+
+```bash
+pkill -f "voice.bridge" 2>/dev/null; sleep 1 && \
+  CLAUDE_CODE_OAUTH_TOKEN=<your_token> \
+  nohup uv run voice-bridge --port 8787 > /tmp/bridge.log 2>&1 &
+```
+
+Then check the log for your URL:
+
+```bash
+grep "Tailscale:" /tmp/bridge.log
+```
+
+Open the URL on your phone (no port number — `tailscale serve` handles port 443):
+
+```
+https://my-pc.tail1234.ts.net/?token=e085fe85...
+```
+
+The `.ts.net` origin is automatically added to the WebSocket allowlist. Traffic stays entirely within your Tailscale network.
+
+---
+
+## Alternative: Cloudflare Tunnel
 
 [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/) creates a free, no-login HTTPS tunnel to your local server. No account required for quick tunnels.
 
@@ -158,25 +190,6 @@ The page loads over HTTPS, microphone permission is granted, and the WebSocket c
 
 - Both the tunnel URL and the token change on every restart — regenerate the full URL each time.
 - Quick tunnels (`trycloudflare.com`) are ephemeral and free. For a stable named tunnel, [create a Cloudflare account](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) and run a persistent tunnel.
-
----
-
-## Using with Tailscale HTTPS
-
-Tailscale's [HTTPS feature](https://tailscale.com/kb/1153/enabling-https) gives every device a stable `*.ts.net` HTTPS URL — no public exposure, no tunnel relay.
-
-```bash
-# Enable HTTPS in Tailscale admin, then:
-BRIDGE_ALLOWED_ORIGIN=* voice-bridge --host 0.0.0.0
-```
-
-Open on phone (replace with your machine's Tailscale HTTPS URL):
-
-```
-https://my-pc.tail1234.ts.net:8787/?token=<token>
-```
-
-Microphone works because the origin is HTTPS. Traffic stays within your Tailscale network.
 
 ---
 

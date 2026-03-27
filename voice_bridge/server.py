@@ -59,6 +59,7 @@ _SENTENCE_RE = re.compile(r"(?<=[.!?\n])\s+")
 _FENCED_CODE_BLOCK_RE = re.compile(r"```[A-Za-z0-9_+-]*\n?[\s\S]*?```")
 _INLINE_CODE_RE = re.compile(r"`([^`]+)`")
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+_EMOJI_RE = re.compile(r"[\U00010000-\U0010FFFF\U00002600-\U000027BF\U0001F300-\U0001FAFF]", flags=re.UNICODE)
 
 # Maximum chars to buffer before forcing a TTS chunk
 _MAX_SENTENCE_CHARS = 150
@@ -88,6 +89,7 @@ def _prepare_tts_text(text: str) -> str:
     cleaned = re.sub(r"\*\*(.*?)\*\*", r"\1", cleaned)
     cleaned = re.sub(r"\*(.*?)\*", r"\1", cleaned)
     cleaned = cleaned.replace("|", " ")
+    cleaned = _EMOJI_RE.sub("", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned.strip()
 
@@ -262,57 +264,72 @@ class BridgeSession:
         self._push_to_talk_active: bool = False
         self._replacement_ws: asyncio.Queue = asyncio.Queue(maxsize=1)
         self._session_done: asyncio.Event = asyncio.Event()
+        self._last_transplant_time: float = 0.0
 
     async def swap_ws(self, new_ws) -> None:
         """Signal run() to transplant the WebSocket (client reconnected same session)."""
         await self._replacement_ws.put(new_ws)
 
     async def run(self) -> None:
-        """Main session loop with WebSocket-transplant support for reconnects."""
+        """Main session loop with WebSocket-transplant support for reconnects.
+
+        On transplant (client reconnects with same session ID), only the
+        reader_task is restarted — processor_task and text_task keep running
+        so Claude's in-flight work is never interrupted.
+        """
         try:
             await self._claude.connect()
+
+            processor_task: asyncio.Task | None = None
+            text_task: asyncio.Task | None = None
 
             while True:
                 await self._send_json({"type": "ready", "model": self._current_model})
                 _log("Session started")
 
-                # Flush stale data from any previous WS iteration
-                while not self._audio_queue.empty():
-                    self._audio_queue.get_nowait()
-                while not self._control_queue.empty():
-                    self._control_queue.get_nowait()
+                # Only flush stale audio/control data when the background tasks
+                # are NOT already running (fresh start, not a transplant).
+                if processor_task is None or processor_task.done():
+                    while not self._audio_queue.empty():
+                        self._audio_queue.get_nowait()
+                    while not self._control_queue.empty():
+                        self._control_queue.get_nowait()
+                    processor_task = asyncio.create_task(self._processor_loop())
+
+                if text_task is None or text_task.done():
+                    text_task = asyncio.create_task(self._text_processor_loop())
 
                 reader_task = asyncio.create_task(self._reader_loop())
-                processor_task = asyncio.create_task(self._processor_loop())
-                text_task = asyncio.create_task(self._text_processor_loop())
                 replace_task = asyncio.create_task(self._replacement_ws.get())
 
-                done, pending = await asyncio.wait(
-                    [reader_task, processor_task, text_task, replace_task],
+                done, _ = await asyncio.wait(
+                    {reader_task, processor_task, text_task, replace_task},
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-                for task in pending:
-                    task.cancel()
-                    try:
-                        await task
-                    except (asyncio.CancelledError, Exception):
-                        pass
 
                 if replace_task in done:
-                    # Client reconnected with same session — swap WS, keep Claude alive
+                    # Soft transplant: swap WS, restart only reader_task.
+                    # processor_task and text_task keep running so Claude
+                    # continues uninterrupted.
                     self.ws = replace_task.result()
                     _log("WebSocket transplanted — resuming session")
                     self._stop_tts.clear()
                     self._abort_response_requested = False
-                    continue
-
-                # Normal exit — cancel replace_task if still pending
-                if not replace_task.done():
-                    replace_task.cancel()
+                    reader_task.cancel()
                     try:
-                        await replace_task
+                        await reader_task
                     except (asyncio.CancelledError, Exception):
                         pass
+                    continue
+
+                # Normal exit (WS disconnect or task error) — cancel everything.
+                for task in (reader_task, processor_task, text_task, replace_task):
+                    if not task.done():
+                        task.cancel()
+                        try:
+                            await task
+                        except (asyncio.CancelledError, Exception):
+                            pass
                 break
 
         finally:
@@ -374,12 +391,9 @@ class BridgeSession:
                         elif data.get("type") == "push_to_talk_end":
                             self._push_to_talk_active = False
                             utterance = self._vad_processor.finalize()
-                            if utterance is not None:
-                                await self._transcribe_and_accumulate(utterance)
-                            if self._pending_segments:
-                                await self._flush_accumulated_segments()
-                            else:
-                                self._continuation_deadline = None
+                            asyncio.create_task(
+                                self._finish_push_to_talk(utterance)
+                            )
                             _log("Push-to-talk ended")
                         elif data.get("type") == "playback_done":
                             # Client finished playing all buffered TTS audio.
@@ -484,6 +498,20 @@ class BridgeSession:
 
         if utterance is not None:
             await self._transcribe_and_accumulate(utterance)
+
+    async def _finish_push_to_talk(self, utterance) -> None:
+        """Transcribe and flush PTT audio outside the reader loop.
+
+        Offloaded from ``_reader_loop`` so that Whisper transcription doesn't
+        block the WebSocket read, which would delay ``stop_tts`` and other
+        time-sensitive control messages.
+        """
+        if utterance is not None:
+            await self._transcribe_and_accumulate(utterance)
+        if self._pending_segments:
+            await self._flush_accumulated_segments()
+        else:
+            self._continuation_deadline = None
 
     async def _handle_barge_in(self, pcm_float: np.ndarray) -> None:
         """Discard mic audio during TTS playback.
@@ -1094,6 +1122,13 @@ async def websocket_endpoint(
             if resume_id and resume_id == _active_session._current_session_id:
                 # Same session reconnecting (e.g. iOS back from background) —
                 # transplant the WebSocket without interrupting Claude.
+                # Rate-limit transplants to prevent a rapid reconnect storm from
+                # spinning the run() loop indefinitely.
+                if now - _active_session._last_transplant_time < 0.5:
+                    _log("Rejecting transplant: cooldown (too soon after last transplant)")
+                    await ws.close(code=4003, reason="Reconnect cooldown, try again shortly")
+                    return
+                _active_session._last_transplant_time = now
                 _log("Same session reconnecting — transplanting WebSocket")
                 transplant_target = _active_session
                 old_ws = _active_session.ws

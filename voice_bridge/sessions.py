@@ -125,16 +125,19 @@ def _format_message(msg: Any) -> dict:
 
 
 def _get_session_jsonl_path(session_id: str) -> Path | None:
-    """Locate the JSONL file for a session under ~/.claude/projects/.
+    """Locate the JSONL file for a session scoped to the current working directory.
+
+    Only searches the project directory that corresponds to the current cwd,
+    preventing accidental access to sessions from other Claude Code projects.
 
     Returns ``None`` if not found.
     """
-    projects_dir = Path.home() / ".claude" / "projects"
-    if not projects_dir.exists():
+    cwd_slug = os.getcwd().replace("/", "-").lstrip("-")
+    project_dir = Path.home() / ".claude" / "projects" / cwd_slug
+    if not project_dir.exists():
         return None
-    for jsonl in projects_dir.glob(f"**/{session_id}.jsonl"):
-        return jsonl
-    return None
+    jsonl = project_dir / f"{session_id}.jsonl"
+    return jsonl if jsonl.exists() else None
 
 
 # ---------------------------------------------------------------------------

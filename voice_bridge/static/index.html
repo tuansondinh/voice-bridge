@@ -1945,7 +1945,7 @@ function handleMessage(msg) {
 
     case 'error':
       removeTypingIndicator();
-      addErrorMessage(msg.message);
+      addErrorMessage(msg.text);
       queuedMessage = null;
       renderQueueBar();
       setSendButtonBusy(false);
@@ -2937,8 +2937,10 @@ async function copyMessage(btn) {
 // ---------------------------------------------------------------------------
 
 function setStatus(state, text) {
-  statusDot.className = 'status-dot ' + state;
-  statusDot.title = text;
+  if (statusDot) {
+    statusDot.className = 'status-dot ' + state;
+    statusDot.title = text;
+  }
 }
 
 // ---------------------------------------------------------------------------
